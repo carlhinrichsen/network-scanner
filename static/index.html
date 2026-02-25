@@ -395,6 +395,7 @@ function renderTable(results, total) {
             <th>Name</th>
             <th>Position</th>
             <th>Company</th>
+            <th>Location</th>
             <th>Industry</th>
             <th>Connected</th>
             <th>LinkedIn</th>
@@ -415,6 +416,7 @@ function renderRow(r) {
   const name = [r.first_name, r.last_name].filter(Boolean).join(' ');
   const enriched = r.enriched_at ? `<span class="enriched-pill">✓ enriched</span>` : '';
   const industry = r.enriched_industry || '–';
+  const location = r.location || (r.enriched_at ? '–' : '<span style="color:var(--border);font-size:11px">enrich to populate</span>');
 
   return `
     <tr>
@@ -422,6 +424,7 @@ function renderRow(r) {
       <td style="white-space:nowrap;font-weight:500">${escHtml(name)}</td>
       <td style="max-width:200px">${escHtml(r.position || '–')}${enriched}</td>
       <td style="white-space:nowrap">${escHtml(r.company || '–')}</td>
+      <td style="color:var(--muted);font-size:12px;white-space:nowrap">${r.location ? escHtml(r.location) : location}</td>
       <td style="color:var(--muted);font-size:12px">${escHtml(industry)}</td>
       <td style="color:var(--muted);font-size:12px;white-space:nowrap">${r.connected_on || '–'}</td>
       <td><a class="linkedin-link" href="${r.linkedin_url}" target="_blank">↗ View</a></td>

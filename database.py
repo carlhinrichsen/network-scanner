@@ -23,6 +23,7 @@ def init_db():
             company TEXT,
             position TEXT,
             connected_on TEXT,
+            location TEXT,
             enriched_industry TEXT,
             enriched_company_desc TEXT,
             enriched_at TEXT,
@@ -30,6 +31,10 @@ def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Migrate existing databases that don't have the location column yet
+    existing_cols = [row[1] for row in c.execute("PRAGMA table_info(connections)").fetchall()]
+    if "location" not in existing_cols:
+        c.execute("ALTER TABLE connections ADD COLUMN location TEXT")
     c.execute("""
         CREATE TABLE IF NOT EXISTS upload_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,14 +122,14 @@ def get_stats() -> dict:
         "last_upload": dict(last_upload) if last_upload else None
     }
 
-def save_enrichment(linkedin_url: str, industry: str, description: str):
+def save_enrichment(linkedin_url: str, industry: str, description: str, location: str = ""):
     conn = get_conn()
     now = datetime.utcnow().isoformat()
     conn.execute("""
         UPDATE connections SET
-            enriched_industry=?, enriched_company_desc=?, enriched_at=?
+            enriched_industry=?, enriched_company_desc=?, location=?, enriched_at=?
         WHERE linkedin_url=?
-    """, (industry, description, now, linkedin_url))
+    """, (industry, description, location, now, linkedin_url))
     conn.commit()
     conn.close()
 

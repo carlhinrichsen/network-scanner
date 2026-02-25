@@ -253,11 +253,11 @@ Score distribution: high (>=0.8): {len([r for r in results if r['_score'] >= 0.8
 # ---------------------------------------------------------------------------
 
 def enrich_company(company_name: str) -> dict:
-    """Look up a company online and return industry + description."""
+    """Look up a company online and return industry, description, and HQ location."""
     tavily = get_tavily()
     try:
         result = tavily.search(
-            query=f"{company_name} company industry what do they do",
+            query=f"{company_name} company industry headquarters location what do they do",
             search_depth="basic",
             max_results=3
         )
@@ -267,7 +267,10 @@ def enrich_company(company_name: str) -> dict:
         resp = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=256,
-            system="Extract industry and a 1-sentence company description from the text. Return JSON: {\"industry\": \"...\", \"description\": \"...\"}. Return ONLY JSON.",
+            system="""Extract industry, a 1-sentence company description, and headquarters city/location from the text.
+Return JSON: {"industry": "...", "description": "...", "location": "City, Country"}.
+For location use the format 'City, Country' or just 'City' if country is obvious. Use empty string if unknown.
+Return ONLY JSON.""",
             messages=[{"role": "user", "content": f"Company: {company_name}\n\nSearch results:\n{snippets[:2000]}"}]
         )
         raw = resp.content[0].text.strip()
@@ -277,7 +280,7 @@ def enrich_company(company_name: str) -> dict:
                 raw = raw[4:]
         return json.loads(raw)
     except Exception as e:
-        return {"industry": "", "description": f"Lookup failed: {str(e)}"}
+        return {"industry": "", "description": f"Lookup failed: {str(e)}", "location": ""}
 
 
 # ---------------------------------------------------------------------------

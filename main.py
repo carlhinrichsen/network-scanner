@@ -173,12 +173,13 @@ async def enrich(req: EnrichRequest):
     for company, urls in to_enrich.items():
         data = enrich_company(company)
         for url in urls:
-            save_enrichment(url, data.get("industry", ""), data.get("description", ""))
+            save_enrichment(url, data.get("industry", ""), data.get("description", ""), data.get("location", ""))
             enriched_count += 1
         results.append({
             "company": company,
             "industry": data.get("industry", ""),
             "description": data.get("description", ""),
+            "location": data.get("location", ""),
             "contacts_updated": len(urls)
         })
 
@@ -201,7 +202,7 @@ async def export_csv(req: ExportRequest):
     output = io.StringIO()
     fieldnames = [
         "first_name", "last_name", "company", "position",
-        "linkedin_url", "email", "connected_on",
+        "location", "linkedin_url", "connected_on",
         "enriched_industry", "enriched_company_desc", "_score"
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
