@@ -252,26 +252,60 @@ Score distribution: high (>=0.8): {len([r for r in results if r['_score'] >= 0.8
 # ENRICHMENT (online lookup via Tavily)
 # ---------------------------------------------------------------------------
 
-def enrich_company(company_name: str) -> dict:
-    """Look up a company online and return industry, description, and HQ location."""
-    tavily = get_tavily()
-    try:
-        result = tavily.search(
-            query=f"{company_name} company industry headquarters location what do they do",
-            search_depth="basic",
-            max_results=3
-        )
-        snippets = " ".join([r.get("content", "") for r in result.get("results", [])])
+def enrich_contact(linkedin_url: str, company_name: str) -> dict:
+    """
+    Enrich a contact with location, industry, and company description.
 
-        client = get_claude()
+    Strategy:
+    1. PRIMARY: Fetch the contact's public LinkedIn profile URL via Tavily —
+       LinkedIn profiles almost always show location in the header.
+    2. FALLBACK: Search for the company + LinkedIn company page / other sources
+       to get HQ location and industry.
+    """
+    tavily = get_tavily()
+    client = get_claude()
+    snippets = ""
+
+    # --- PRIMARY: look up the person's LinkedIn profile directly ---
+    try:
+        profile_result = tavily.search(
+            query=linkedin_url,
+            search_depth="basic",
+            max_results=2,
+            include_domains=["linkedin.com"]
+        )
+        snippets = " ".join([r.get("content", "") for r in profile_result.get("results", [])])
+    except Exception:
+        pass
+
+    # --- FALLBACK: search company if profile lookup yielded nothing useful ---
+    if len(snippets.strip()) < 100 and company_name:
+        try:
+            company_result = tavily.search(
+                query=f"{company_name} LinkedIn company page headquarters location industry",
+                search_depth="basic",
+                max_results=3
+            )
+            company_snippets = " ".join([r.get("content", "") for r in company_result.get("results", [])])
+            snippets = snippets + "\n" + company_snippets
+        except Exception:
+            pass
+
+    if not snippets.strip():
+        return {"industry": "", "description": "", "location": ""}
+
+    # --- Claude extracts structured data from combined snippets ---
+    try:
         resp = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=256,
-            system="""Extract industry, a 1-sentence company description, and headquarters city/location from the text.
-Return JSON: {"industry": "...", "description": "...", "location": "City, Country"}.
-For location use the format 'City, Country' or just 'City' if country is obvious. Use empty string if unknown.
-Return ONLY JSON.""",
-            messages=[{"role": "user", "content": f"Company: {company_name}\n\nSearch results:\n{snippets[:2000]}"}]
+            system="""From the search results about a LinkedIn contact and/or their company, extract:
+- location: the person's city/region (from their LinkedIn profile if visible), or company HQ as fallback. Format: "City, Country" or "City, State" for US. Empty string if not found.
+- industry: the company's industry sector (e.g. "FinTech", "SaaS", "Healthcare", "Consulting"). Empty string if unknown.
+- description: one concise sentence describing what the company does. Empty string if unknown.
+
+Return ONLY valid JSON: {"location": "...", "industry": "...", "description": "..."}""",
+            messages=[{"role": "user", "content": f"LinkedIn URL: {linkedin_url}\nCompany: {company_name}\n\nSearch results:\n{snippets[:3000]}"}]
         )
         raw = resp.content[0].text.strip()
         if raw.startswith("```"):

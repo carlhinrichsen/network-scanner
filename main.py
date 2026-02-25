@@ -13,7 +13,7 @@ from database import init_db, upsert_connections, get_all_connections, get_stats
 from csv_parser import parse_linkedin_csv
 from ai_engine import (
     extract_filters, filter_connections, synthesise_response,
-    compare_icps, enrich_company, chat_response
+    compare_icps, enrich_contact, chat_response
 )
 
 app = FastAPI(title="Network Scanner")
@@ -155,36 +155,53 @@ async def enrich(req: EnrichRequest):
     connections = get_all_connections()
     conn_map = {c["linkedin_url"]: c for c in connections}
 
-    # Get unique companies for requested URLs
-    to_enrich = {}
+    # Build per-contact enrichment list (keyed by company for result grouping)
+    to_enrich = {}  # company -> [linkedin_urls]
     for url in req.linkedin_urls:
         c = conn_map.get(url)
-        if c and c.get("company") and not c.get("enriched_at"):
-            company = c["company"]
+        if c and not c.get("enriched_at"):
+            company = c.get("company") or "Unknown"
             if company not in to_enrich:
                 to_enrich[company] = []
             to_enrich[company].append(url)
 
     if not to_enrich:
-        return {"message": "All selected contacts are already enriched or have no company.", "enriched": 0}
+        return {"message": "All selected contacts are already enriched.", "enriched": 0}
 
     enriched_count = 0
     results = []
+    # Cache industry/description per company — only look up once per unique company
+    company_cache: dict = {}
+
     for company, urls in to_enrich.items():
-        data = enrich_company(company)
         for url in urls:
-            save_enrichment(url, data.get("industry", ""), data.get("description", ""), data.get("location", ""))
+            # Each contact gets their own profile lookup (for personal location)
+            data = enrich_contact(url, company)
+            location = data.get("location", "")
+            industry = data.get("industry", "")
+            description = data.get("description", "")
+
+            # If this contact's profile didn't yield industry/desc, use cached company data
+            if (not industry or not description) and company in company_cache:
+                industry = industry or company_cache[company].get("industry", "")
+                description = description or company_cache[company].get("description", "")
+
+            # Cache company-level data for subsequent contacts at same company
+            if company not in company_cache:
+                company_cache[company] = {"industry": industry, "description": description}
+
+            save_enrichment(url, industry, description, location)
             enriched_count += 1
+
         results.append({
             "company": company,
-            "industry": data.get("industry", ""),
-            "description": data.get("description", ""),
-            "location": data.get("location", ""),
+            "industry": company_cache.get(company, {}).get("industry", ""),
+            "description": company_cache.get(company, {}).get("description", ""),
             "contacts_updated": len(urls)
         })
 
     return {
-        "message": f"Enriched {len(to_enrich)} companies ({enriched_count} contacts updated).",
+        "message": f"Enriched {len(to_enrich)} contacts across {len(to_enrich)} companies.",
         "enriched": enriched_count,
         "details": results
     }
