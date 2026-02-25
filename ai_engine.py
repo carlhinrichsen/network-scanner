@@ -4,7 +4,7 @@ import anthropic
 from tavily import TavilyClient
 
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
+TAVILY_KEY = os.environ.get("TAVILY_KEY", "") or os.environ.get("TAVILY_API_KEY", "")
 
 def get_claude():
     return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -58,7 +58,6 @@ def extract_filters(user_message: str, conversation_history: list) -> dict:
         messages=messages
     )
     raw = resp.content[0].text.strip()
-    # Strip markdown code blocks if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -71,10 +70,6 @@ def extract_filters(user_message: str, conversation_history: list) -> dict:
 # ---------------------------------------------------------------------------
 
 def score_connection(conn: dict, filters: dict) -> float:
-    """
-    Score a connection 0.0-1.0 against extracted filters.
-    Returns score and populates no external calls.
-    """
     score = 0.0
     weights = 0.0
     position = (conn.get("position") or "").lower()
@@ -145,7 +140,7 @@ def score_connection(conn: dict, filters: dict) -> float:
     return min(score / weights, 1.0)
 
 
-def filter_connections(connections: list[dict], filters: dict) -> list[dict]:
+def filter_connections(connections: list, filters: dict) -> list:
     threshold = filters.get("confidence_threshold", 0.5)
     results = []
     for conn in connections:
@@ -157,7 +152,7 @@ def filter_connections(connections: list[dict], filters: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# ICP COMPARISON (quick, local only)
+# ICP COMPARISON (enrichment-aware)
 # ---------------------------------------------------------------------------
 
 ICP_SYSTEM = """You are a B2B market analyst. The user will describe 2-3 Ideal Customer Profiles (ICPs).
@@ -167,7 +162,7 @@ Return a JSON array, one object per ICP, each with an added "icp_name" string fi
 IMPORTANT: Be specific and restrictive with keywords. Each ICP must have meaningful position_keywords and/or position_concepts that clearly differentiate it. Set confidence_threshold to 0.65.
 Return ONLY the JSON array."""
 
-def extract_icps(user_message: str) -> list[dict]:
+def extract_icps(user_message: str) -> list:
     client = get_claude()
     resp = client.messages.create(
         model="claude-haiku-4-5",
@@ -182,11 +177,62 @@ def extract_icps(user_message: str) -> list[dict]:
             raw = raw[4:]
     return json.loads(raw)
 
-def compare_icps(connections: list[dict], icp_descriptions: str) -> list[dict]:
+def compare_icps(connections: list, icp_descriptions: str, auto_enrich_threshold: int = 50, enrich_fn=None, save_fn=None) -> dict:
+    """
+    Compare contacts against ICPs.
+    - auto_enrich_threshold: if unenriched contacts <= this number, enrich automatically
+    - enrich_fn: callable(linkedin_url, company) -> {location, industry, description}
+    - save_fn: callable(linkedin_url, industry, description, location) -> None
+    Returns dict with keys: results (list of ICP cards), enrichment_performed (bool),
+    enrichment_needed (bool), unenriched_count (int), unenriched_urls (list)
+    """
     icps = extract_icps(icp_descriptions)
+
+    # Count unenriched contacts
+    unenriched = [c for c in connections if not c.get("enriched_at")]
+    unenriched_count = len(unenriched)
+    enrichment_performed = False
+
+    if unenriched_count > 0 and enrich_fn and save_fn:
+        if unenriched_count <= auto_enrich_threshold:
+            # Auto-enrich silently
+            company_cache = {}
+            for c in unenriched:
+                url = c.get("linkedin_url", "")
+                company = c.get("company", "")
+                try:
+                    data = enrich_fn(url, company)
+                    industry = data.get("industry", "")
+                    description = data.get("description", "")
+                    location = data.get("location", "")
+                    # Use cached company data if individual lookup was weak
+                    if (not industry or not description) and company in company_cache:
+                        industry = industry or company_cache[company].get("industry", "")
+                        description = description or company_cache[company].get("description", "")
+                    if company not in company_cache:
+                        company_cache[company] = {"industry": industry, "description": description}
+                    save_fn(url, industry, description, location)
+                    # Update the in-memory contact so scoring uses fresh data
+                    c["enriched_industry"] = industry
+                    c["enriched_company_desc"] = description
+                    c["location"] = location
+                    c["enriched_at"] = "just_now"
+                except Exception:
+                    pass
+            enrichment_performed = True
+        else:
+            # Too many to auto-enrich — ask user
+            return {
+                "results": [],
+                "enrichment_performed": False,
+                "enrichment_needed": True,
+                "unenriched_count": unenriched_count,
+                "unenriched_urls": [c.get("linkedin_url","") for c in unenriched],
+                "icp_descriptions": icp_descriptions,
+            }
+
     results = []
     for icp in icps:
-        # Enforce minimum threshold of 0.6 for ICP mode
         icp["confidence_threshold"] = max(icp.get("confidence_threshold", 0.65), 0.6)
         matched = filter_connections(connections, icp)
         high_confidence = [m for m in matched if m["_score"] >= 0.75]
@@ -200,7 +246,14 @@ def compare_icps(connections: list[dict], icp_descriptions: str) -> list[dict]:
             "sample_contacts": matched[:5],
             "filters_used": icp,
         })
-    return results
+    return {
+        "results": results,
+        "enrichment_performed": enrichment_performed,
+        "enrichment_needed": False,
+        "unenriched_count": unenriched_count,
+        "unenriched_urls": [],
+        "icp_descriptions": icp_descriptions,
+    }
 
 def _top_values(values: list, n: int) -> list:
     from collections import Counter
@@ -209,7 +262,7 @@ def _top_values(values: list, n: int) -> list:
 
 
 # ---------------------------------------------------------------------------
-# RESPONSE SYNTHESIS
+# RESPONSE SYNTHESIS (for Search mode)
 # ---------------------------------------------------------------------------
 
 SYNTHESIS_SYSTEM = """You are a B2B network intelligence assistant.
@@ -223,12 +276,7 @@ Structure your response as:
 Be conversational, specific, and helpful. Do not list every contact — the table handles that.
 Keep your response under 200 words."""
 
-def synthesise_response(
-    user_message: str,
-    filters: dict,
-    results: list[dict],
-    conversation_history: list
-) -> str:
+def synthesise_response(user_message: str, filters: dict, results: list, conversation_history: list) -> str:
     client = get_claude()
 
     context = f"""User asked: {user_message}
@@ -259,18 +307,14 @@ Score distribution: high (>=0.8): {len([r for r in results if r['_score'] >= 0.8
 def enrich_contact(linkedin_url: str, company_name: str) -> dict:
     """
     Enrich a contact with location, industry, and company description.
-
     Strategy:
-    1. PRIMARY: Fetch the contact's public LinkedIn profile URL via Tavily —
-       LinkedIn profiles almost always show location in the header.
-    2. FALLBACK: Search for the company + LinkedIn company page / other sources
-       to get HQ location and industry.
+    1. PRIMARY: Fetch the contact's public LinkedIn profile URL via Tavily
+    2. FALLBACK: Search for the company + LinkedIn company page
     """
     tavily = get_tavily()
     client = get_claude()
     snippets = ""
 
-    # --- PRIMARY: look up the person's LinkedIn profile directly ---
     try:
         profile_result = tavily.search(
             query=linkedin_url,
@@ -282,7 +326,6 @@ def enrich_contact(linkedin_url: str, company_name: str) -> dict:
     except Exception:
         pass
 
-    # --- FALLBACK: search company if profile lookup yielded nothing useful ---
     if len(snippets.strip()) < 100 and company_name:
         try:
             company_result = tavily.search(
@@ -298,7 +341,6 @@ def enrich_contact(linkedin_url: str, company_name: str) -> dict:
     if not snippets.strip():
         return {"industry": "", "description": "", "location": ""}
 
-    # --- Claude extracts structured data from combined snippets ---
     try:
         resp = client.messages.create(
             model="claude-haiku-4-5",
@@ -322,7 +364,141 @@ Return ONLY valid JSON: {"location": "...", "industry": "...", "description": ".
 
 
 # ---------------------------------------------------------------------------
-# GENERAL CHAT (for follow-up questions, clarifications)
+# DISCOVERY MODE — Sonnet-powered, blends DB search + web research
+# ---------------------------------------------------------------------------
+
+DISCOVERY_SYSTEM = """You are a senior B2B business development analyst with deep expertise in markets, job titles, company types, and go-to-market strategy. You have access to the user's LinkedIn network database and can search the web for additional context.
+
+Your role in Discovery mode:
+- Act like a thoughtful research partner, not just a search engine
+- Proactively surface angles and insights the user hasn't considered
+- Ask clarifying questions when they would meaningfully change your analysis
+- Use web research to enrich your understanding of industries, job titles, market segments, and geographies
+- Blend database findings with market context to give strategic recommendations
+
+You have access to:
+- The user's full LinkedIn connections database (provided as context)
+- Web search results (provided inline when relevant)
+- Conversation history
+
+Response style:
+- Conversational but substantive — think out loud with the user
+- Use **bold** for key terms and insights
+- When you want to propose a web search, format it EXACTLY as: [SEARCH: your search query here]
+  Only propose searches that would genuinely add value. Max 2 per response.
+- When you want to search the database, format it EXACTLY as: [DB_SEARCH: describe what to find]
+  Max 1 per response.
+- Ask at most 2 clarifying questions per response, only when the answer would change your analysis significantly
+- Keep responses under 400 words unless depth is clearly warranted"""
+
+
+def discovery_response(
+    user_message: str,
+    conversation_history: list,
+    connections: list,
+    db_stats: dict,
+    proposed_searches: list = None,  # web search queries approved by user
+    proposed_db_search: str = None,  # db search approved by user
+) -> dict:
+    """
+    Discovery mode: Sonnet-powered response that blends DB context, web research, and proactive insights.
+
+    Returns dict with:
+    - message: str (the response text, may contain [SEARCH:...] and [DB_SEARCH:...] tags)
+    - type: "discovery"
+    - proposed_searches: list of search queries extracted from response (need user confirmation)
+    - proposed_db_search: str or None (db search query, need user confirmation)
+    - web_results: dict of {query: summary} for approved searches already run
+    - db_results: list of contacts if db search was approved and run
+    - total: int
+    """
+    client = get_claude()
+    tavily = get_tavily()
+
+    # Run any pre-approved web searches
+    web_context = ""
+    web_results_map = {}
+    if proposed_searches:
+        for query in proposed_searches:
+            try:
+                res = tavily.search(query=query, search_depth="basic", max_results=4)
+                snippets = "\n".join([
+                    f"- {r.get('title','')}: {r.get('content','')[:300]}"
+                    for r in res.get("results", [])
+                ])
+                web_results_map[query] = snippets
+                web_context += f"\n\n[Web search: '{query}']\n{snippets}"
+            except Exception as e:
+                web_context += f"\n\n[Web search: '{query}' failed: {str(e)}]"
+
+    # Run pre-approved DB search
+    db_results = []
+    db_context_str = ""
+    if proposed_db_search:
+        try:
+            filters = extract_filters(proposed_db_search, [])
+            db_results = filter_connections(connections, filters)
+            top_cos = _top_values([r["company"] for r in db_results[:100]], 8)
+            top_pos = _top_values([r["position"] for r in db_results[:100]], 8)
+            db_context_str = f"\n\n[DB search: '{proposed_db_search}' → {len(db_results)} contacts found]\nTop companies: {top_cos}\nTop positions: {top_pos}"
+        except Exception as e:
+            db_context_str = f"\n\n[DB search failed: {str(e)}]"
+
+    # Build system context
+    enriched_count = db_stats.get("enriched", 0)
+    total_count = db_stats.get("total", 0)
+    companies_count = db_stats.get("companies", 0)
+    system = DISCOVERY_SYSTEM + f"""
+
+Database context:
+- {total_count} total LinkedIn connections
+- {companies_count} unique companies
+- {enriched_count} contacts enriched with industry/location data ({round(enriched_count/max(total_count,1)*100)}% enriched)
+
+Sample of database positions (for context): {_top_values([c.get("position","") for c in connections[:500] if c.get("position")], 20)}
+Sample of database companies: {_top_values([c.get("company","") for c in connections[:500] if c.get("company")], 20)}
+"""
+
+    if web_context:
+        system += f"\n\nWeb research results:{web_context}"
+    if db_context_str:
+        system += f"\n\nDatabase search results:{db_context_str}"
+
+    messages = conversation_history[-12:] + [{"role": "user", "content": user_message}]
+
+    resp = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1024,
+        system=system,
+        messages=messages
+    )
+    message_text = resp.content[0].text.strip()
+
+    # Extract any proposed searches from the response
+    import re
+    new_proposed_searches = re.findall(r'\[SEARCH:\s*([^\]]+)\]', message_text)
+    new_proposed_db_search_matches = re.findall(r'\[DB_SEARCH:\s*([^\]]+)\]', message_text)
+    new_proposed_db_search = new_proposed_db_search_matches[0] if new_proposed_db_search_matches else None
+
+    # Clean the tags from displayed message
+    display_message = re.sub(r'\[SEARCH:\s*[^\]]+\]', '', message_text)
+    display_message = re.sub(r'\[DB_SEARCH:\s*[^\]]+\]', '', display_message)
+    display_message = display_message.strip()
+
+    return {
+        "type": "discovery",
+        "message": display_message,
+        "proposed_searches": new_proposed_searches,
+        "proposed_db_search": new_proposed_db_search,
+        "web_results": web_results_map,
+        "db_results": db_results[:20],  # preview only
+        "total": len(db_results),
+        "has_proposals": bool(new_proposed_searches or new_proposed_db_search),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GENERAL CHAT (legacy, kept for fallback)
 # ---------------------------------------------------------------------------
 
 CHAT_SYSTEM = """You are a B2B network intelligence assistant helping a business development professional
@@ -334,9 +510,7 @@ You help with:
 - Understanding what companies or job titles mean
 - Suggesting BD strategies based on network composition
 
-Be concise, practical, and focused on business development value.
-When the user describes a search, acknowledge it and confirm what you understood before searching.
-When asked about ICPs, offer a quick estimate first, then ask if they want a deep search."""
+Be concise, practical, and focused on business development value."""
 
 def chat_response(user_message: str, conversation_history: list, context: str = "") -> str:
     client = get_claude()

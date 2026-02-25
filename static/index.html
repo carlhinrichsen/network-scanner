@@ -170,6 +170,20 @@
   .status-pending { background: rgba(251,191,36,.15); color: var(--yellow); }
   .status-admin { background: rgba(107,99,255,.2); color: var(--accent2); }
 
+  /* Threshold popover */
+  .threshold-wrap { position: relative; display: inline-flex; align-items: center; }
+  .threshold-popover { display: none; position: absolute; bottom: calc(100% + 8px); right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; width: 220px; z-index: 50; box-shadow: 0 4px 20px rgba(0,0,0,.4); }
+  .threshold-popover.open { display: block; }
+  .threshold-popover label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.4; }
+  .threshold-popover input[type=number] { width: 70px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; color: var(--text); font-size: 13px; font-family: var(--font); }
+  /* Discovery proposal banner */
+  .proposal-banner { display: none; background: rgba(107,99,255,.08); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 16px; margin: 8px 12px; font-size: 13px; }
+  .proposal-banner.active { display: block; }
+  .proposal-banner .proposal-title { font-weight: 600; color: var(--accent2); margin-bottom: 8px; }
+  .proposal-item { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+  .proposal-item:last-child { border-bottom: none; }
+  .proposal-actions { display: flex; gap: 6px; margin-top: 10px; }
+
   /* Spinner */
   .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -279,7 +293,7 @@
       <div class="mode-tabs">
         <button class="mode-tab active" data-mode="search" onclick="setMode('search')">🔍 Search</button>
         <button class="mode-tab" data-mode="icp" onclick="setMode('icp')">🎯 ICP</button>
-        <button class="mode-tab" data-mode="chat" onclick="setMode('chat')">💬 Chat</button>
+        <button class="mode-tab" data-mode="discovery" onclick="setMode('discovery')">🔭 Discovery</button>
       </div>
       <div class="input-row">
         <textarea class="chat-input" id="chat-input" rows="2" placeholder='e.g. "Find heads of sales at SaaS companies"' onkeydown="handleKey(event)"></textarea>
@@ -296,7 +310,14 @@
       </div>
       <div class="results-actions">
         <span class="selected-count" id="selected-count"></span>
-        <button class="action-btn" id="enrich-btn" onclick="requestEnrich()" disabled>✨ Enrich</button>
+        <div class="threshold-wrap" id="threshold-wrap" style="display:none">
+          <button class="action-btn" id="enrich-btn" onclick="requestEnrich()" disabled>✨ Enrich</button>
+          <button class="action-btn" style="padding:6px 8px;margin-left:2px" onclick="toggleThresholdPopover(event)" title="Auto-enrich settings">⚙</button>
+          <div class="threshold-popover" id="threshold-popover">
+            <label>Auto-enrich ICP contacts if fewer than <strong id="threshold-display">50</strong> are unenriched.<br><span style="font-size:11px">Set to 0 to always ask.</span></label>
+            <input type="number" id="threshold-input" min="0" max="500" value="50" oninput="updateThreshold(this.value)">
+          </div>
+        </div>
         <button class="action-btn primary" id="export-btn" onclick="exportCSV()" disabled>⬇ Export CSV</button>
       </div>
     </div>
@@ -308,6 +329,14 @@
       </div>
     </div>
     <div class="preview-notice" id="preview-notice"></div>
+    <div class="proposal-banner" id="proposal-banner">
+      <div class="proposal-title">🔭 Discovery wants to run searches</div>
+      <div id="proposal-list"></div>
+      <div class="proposal-actions">
+        <button class="action-btn primary" onclick="runProposedSearches()">Run searches</button>
+        <button class="action-btn" onclick="skipProposedSearches()">Skip</button>
+      </div>
+    </div>
     <div class="guest-notice" id="guest-notice">⚡ Guest mode — results are not saved. <a href="#" onclick="showAuthScreen()" style="color:var(--yellow)">Log in</a> to access your stored contacts.</div>
     <div id="results-body" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
       <div class="empty-state">
@@ -330,6 +359,10 @@ let pendingEnrichUrls = [];
 let isGuest = false;
 let guestContacts = [];
 let isAdmin = false;
+let autoEnrichThreshold = parseInt(localStorage.getItem('autoEnrichThreshold') || '50', 10);
+let pendingProposedSearches = [];
+let pendingProposedDbSearch = null;
+let pendingProposedMessage = '';  // the original message to re-send with proposals
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 function handleOAuthRedirectParams() {
@@ -378,7 +411,10 @@ function enterPrivateMode(email, admin) {
   document.getElementById('mode-badge').textContent = '🔒 Private';
   document.getElementById('mode-badge').className = 'mode-badge private';
   document.getElementById('user-email-display').textContent = email;
-  document.getElementById('enrich-btn').style.display = '';
+  document.getElementById('threshold-wrap').style.display = 'inline-flex';
+  document.getElementById('threshold-input').value = autoEnrichThreshold;
+  document.getElementById('threshold-display').textContent = autoEnrichThreshold;
+  document.getElementById('enrich-btn').disabled = true;
   document.getElementById('guest-notice').style.display = 'none';
   if (admin) document.getElementById('admin-btn').style.display = '';
   loadStats();
@@ -423,7 +459,7 @@ function setMode(mode) {
   const ph = {
     search: 'e.g. "Find heads of sales at SaaS companies"',
     icp: 'Describe 2-3 ICPs: "ICP1: CMOs at enterprise, ICP2: AI founders, ICP3: VPs of Product"',
-    chat: 'Ask anything about your network or BD strategy...'
+    discovery: 'Ask anything — I\'ll search your network, the web, and think out loud with you...'
   };
   document.getElementById('chat-input').placeholder = ph[mode];
 }
@@ -441,7 +477,12 @@ async function sendMessage() {
   btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>';
   const typingEl = appendMessage('assistant', '<div class="spinner"></div>', true);
   try {
-    const body = { message:msg, history:conversationHistory, mode:currentMode };
+    const body = {
+      message: msg,
+      history: conversationHistory,
+      mode: currentMode,
+      auto_enrich_threshold: autoEnrichThreshold,
+    };
     if (isGuest) body.guest_data = guestContacts;
     const res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' });
     const data = await res.json();
@@ -450,6 +491,7 @@ async function sendMessage() {
     if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20);
     typingEl.querySelector('.msg-bubble').innerHTML = formatMessage(data.message);
     typingEl.querySelector('.msg-meta').textContent = new Date().toLocaleTimeString();
+
     if (data.type === 'search') {
       currentResults = data.results || [];
       currentFilters = data.filters;
@@ -457,8 +499,28 @@ async function sendMessage() {
       renderTable(currentResults, data.total);
       document.getElementById('export-btn').disabled = currentResults.length === 0;
       document.getElementById('enrich-btn').disabled = isGuest || currentResults.length === 0;
+
     } else if (data.type === 'icp_comparison') {
       renderICPComparison(data.icp_results);
+
+    } else if (data.type === 'icp_enrich_needed') {
+      // Show inline confirm buttons in chat
+      showIcpEnrichConfirm(data.unenriched_count, data.icp_descriptions, typingEl);
+
+    } else if (data.type === 'discovery') {
+      // Show web results if any were run
+      if (data.db_results && data.db_results.length > 0) {
+        currentResults = data.db_results;
+        checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+        renderTable(currentResults, data.total);
+        document.getElementById('export-btn').disabled = false;
+      }
+      // Surface proposed searches for user confirmation
+      if (data.has_proposals) {
+        showProposalBanner(data.proposed_searches, data.proposed_db_search, msg);
+      } else {
+        hideProposalBanner();
+      }
     }
   } catch(e) { typingEl.querySelector('.msg-bubble').textContent = '❌ Error. Please try again.'; }
   btn.disabled = false; btn.innerHTML = '➤';
@@ -474,6 +536,119 @@ function appendMessage(role, content, isTyping=false) {
 
 function formatMessage(t) {
   return String(t).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\*(.*?)\*/g,'<em>$1</em>').replace(/\n/g,'<br>');
+}
+
+// ── Threshold popover ──────────────────────────────────────────────────────
+function toggleThresholdPopover(e) {
+  e.stopPropagation();
+  document.getElementById('threshold-popover').classList.toggle('open');
+}
+document.addEventListener('click', () => document.getElementById('threshold-popover')?.classList.remove('open'));
+
+function updateThreshold(val) {
+  autoEnrichThreshold = parseInt(val, 10) || 0;
+  localStorage.setItem('autoEnrichThreshold', autoEnrichThreshold);
+  document.getElementById('threshold-display').textContent = autoEnrichThreshold;
+}
+
+// ── ICP enrich confirmation (inline in chat) ────────────────────────────────
+function showIcpEnrichConfirm(unenrichedCount, icpDescriptions, msgEl) {
+  const bubble = msgEl.querySelector('.msg-bubble');
+  bubble.innerHTML += `
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="action-btn primary" style="font-size:12px" onclick="confirmIcpEnrich('${escHtml(icpDescriptions).replace(/'/g,"\\'")}', this)">✨ Yes, enrich ${unenrichedCount} contacts</button>
+      <button class="action-btn" style="font-size:12px" onclick="skipIcpEnrich('${escHtml(icpDescriptions).replace(/'/g,"\\'")}', this)">Skip, show estimate anyway</button>
+    </div>`;
+}
+
+async function confirmIcpEnrich(icpDescriptions, btn) {
+  btn.closest('div').innerHTML = '<span style="color:var(--muted);font-size:12px">⏳ Enriching contacts, then scoring ICPs…</span>';
+  const body = {
+    message: icpDescriptions,
+    history: conversationHistory,
+    mode: 'icp',
+    auto_enrich_threshold: autoEnrichThreshold,
+    icp_confirmed_enrich: true,
+    icp_descriptions: icpDescriptions,
+  };
+  const res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' });
+  const data = await res.json();
+  if (data.type === 'icp_comparison') renderICPComparison(data.icp_results);
+  appendMessage('assistant', data.message);
+}
+
+async function skipIcpEnrich(icpDescriptions, btn) {
+  btn.closest('div').remove();
+  const body = {
+    message: icpDescriptions,
+    history: conversationHistory,
+    mode: 'icp',
+    auto_enrich_threshold: 999999,  // force skip enrichment
+    icp_confirmed_enrich: false,
+    icp_descriptions: icpDescriptions,
+  };
+  const res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' });
+  const data = await res.json();
+  if (data.type === 'icp_comparison') renderICPComparison(data.icp_results);
+  appendMessage('assistant', data.message + '\n\n*Note: results based on unenriched data — consider enriching for better accuracy.*');
+}
+
+// ── Discovery proposal banner ──────────────────────────────────────────────
+function showProposalBanner(searches, dbSearch, originalMsg) {
+  pendingProposedSearches = searches || [];
+  pendingProposedDbSearch = dbSearch || null;
+  pendingProposedMessage = originalMsg;
+  const banner = document.getElementById('proposal-banner');
+  const list = document.getElementById('proposal-list');
+  let html = '';
+  searches.forEach(q => {
+    html += `<div class="proposal-item"><span>🌐 Web: <em>${escHtml(q)}</em></span></div>`;
+  });
+  if (dbSearch) {
+    html += `<div class="proposal-item"><span>🗄 DB: <em>${escHtml(dbSearch)}</em></span></div>`;
+  }
+  list.innerHTML = html;
+  banner.classList.add('active');
+}
+
+function hideProposalBanner() {
+  document.getElementById('proposal-banner').classList.remove('active');
+  pendingProposedSearches = [];
+  pendingProposedDbSearch = null;
+}
+
+async function runProposedSearches() {
+  hideProposalBanner();
+  const btn = document.getElementById('send-btn');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>';
+  const typingEl = appendMessage('assistant', '<div class="spinner"></div>', true);
+  try {
+    const body = {
+      message: pendingProposedMessage,
+      history: conversationHistory,
+      mode: 'discovery',
+      proposed_searches: pendingProposedSearches,
+      proposed_db_search: pendingProposedDbSearch || '',
+    };
+    const res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' });
+    const data = await res.json();
+    conversationHistory.push({role:'assistant', content: data.message});
+    typingEl.querySelector('.msg-bubble').innerHTML = formatMessage(data.message);
+    typingEl.querySelector('.msg-meta').textContent = new Date().toLocaleTimeString();
+    if (data.db_results && data.db_results.length > 0) {
+      currentResults = data.db_results;
+      checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+      renderTable(currentResults, data.total);
+      document.getElementById('export-btn').disabled = false;
+    }
+    if (data.has_proposals) showProposalBanner(data.proposed_searches, data.proposed_db_search, pendingProposedMessage);
+  } catch(e) { typingEl.querySelector('.msg-bubble').textContent = '❌ Search failed. Please try again.'; }
+  btn.disabled = false; btn.innerHTML = '➤';
+}
+
+function skipProposedSearches() {
+  hideProposalBanner();
+  appendMessage('assistant', 'OK, skipped the web searches. Let me know if you\'d like to dig deeper on anything.');
 }
 
 // ── Table state ────────────────────────────────────────────────────────────

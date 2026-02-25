@@ -15,7 +15,7 @@ from database import init_db, upsert_connections, get_all_connections, get_stats
 from csv_parser import parse_linkedin_csv
 from ai_engine import (
     extract_filters, filter_connections, synthesise_response,
-    compare_icps, enrich_contact, chat_response
+    compare_icps, enrich_contact, chat_response, discovery_response
 )
 from auth import (
     init_auth_db, upsert_google_user, create_session, validate_session,
@@ -228,6 +228,11 @@ class ChatMessage(BaseModel):
     history: list = []
     mode: str = "search"
     guest_data: list = []
+    auto_enrich_threshold: int = 50          # ICP: auto-enrich if unenriched <= this
+    proposed_searches: list = []             # Discovery: pre-approved web search queries
+    proposed_db_search: str = ""             # Discovery: pre-approved DB search
+    icp_confirmed_enrich: bool = False       # ICP: user confirmed large enrichment
+    icp_descriptions: str = ""              # ICP: re-passed when confirming enrichment
 
 class EnrichRequest(BaseModel):
     linkedin_urls: list[str]
@@ -284,8 +289,9 @@ async def stats(request: Request):
 @app.post("/api/chat")
 async def chat(req: ChatMessage, request: Request):
     session = get_session(request)
+    is_private = bool(session)
 
-    if session:
+    if is_private:
         connections = get_all_connections()
         db_context = f"{len(connections)} stored contacts"
     elif req.guest_data:
@@ -305,19 +311,65 @@ async def chat(req: ChatMessage, request: Request):
             "results": [], "total": 0
         }
 
-    # ICP comparison
+    # ── Discovery mode ──────────────────────────────────────────────────────
+    if req.mode == "discovery":
+        if not is_private:
+            return {
+                "type": "chat",
+                "message": "Discovery mode requires a private account. Please log in to use web research and deep analysis.",
+                "results": [], "total": 0
+            }
+        db_stats = get_stats()
+        result = discovery_response(
+            user_message=req.message,
+            conversation_history=req.history,
+            connections=connections,
+            db_stats=db_stats,
+            proposed_searches=req.proposed_searches or [],
+            proposed_db_search=req.proposed_db_search or None,
+        )
+        return result
+
+    # ── ICP mode ────────────────────────────────────────────────────────────
     icp_keywords = ["icp", "ideal customer", "compare", "persona", "profile", "which type", "target audience"]
     is_icp = req.mode == "icp" or any(kw in req.message.lower() for kw in icp_keywords)
-    if is_icp and any(str(i) in req.message for i in range(2, 6)):
-        icp_results = compare_icps(connections, req.message)
+    if is_icp:
+        # When user confirmed a large enrichment, re-run with full enrich
+        icp_desc = req.icp_descriptions or req.message
+        threshold = req.auto_enrich_threshold if not req.icp_confirmed_enrich else len(connections)
+
+        enrich_fn = enrich_contact if is_private else None
+        save_fn = save_enrichment if is_private else None
+
+        icp_data = compare_icps(
+            connections=connections,
+            icp_descriptions=icp_desc,
+            auto_enrich_threshold=threshold,
+            enrich_fn=enrich_fn,
+            save_fn=save_fn,
+        )
+
+        if icp_data["enrichment_needed"]:
+            # Return a special type so frontend shows confirmation UI
+            unenriched = icp_data["unenriched_count"]
+            return {
+                "type": "icp_enrich_needed",
+                "message": f"🔍 I found **{unenriched} unenriched contacts** in your network. Enriching them will make ICP scoring much more accurate (location, industry, company descriptions).\n\nThis will take ~{max(1, unenriched // 10)} minutes. Proceed?",
+                "unenriched_count": unenriched,
+                "icp_descriptions": icp_desc,
+                "results": [], "total": 0
+            }
+
+        icp_results = icp_data["results"]
+        enrichment_note = " ✨ Contacts were enriched before scoring." if icp_data["enrichment_performed"] else ""
         return {
             "type": "icp_comparison",
-            "message": f"Quick estimate complete. Compared {len(icp_results)} ICPs against {len(connections)} contacts.",
+            "message": f"Compared {len(icp_results)} ICPs against {len(connections)} contacts.{enrichment_note}",
             "icp_results": icp_results,
             "total": len(icp_results)
         }
 
-    # Search or chat
+    # ── Search mode ─────────────────────────────────────────────────────────
     search_keywords = [
         "find", "show", "search", "look for", "who", "list", "give me",
         "filter", "identify", "get me", "fetch", "people", "contacts",
