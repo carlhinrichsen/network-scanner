@@ -1,22 +1,19 @@
 """
-Simple but secure auth layer.
-- Sessions stored server-side in SQLite (same DB)
-- Approved domains (e.g. execfunctions.co) auto-approved on first login
-- Other emails go into a pending whitelist that the admin approves
-- Admin is identified by ADMIN_EMAIL env var
-- Passwords hashed with bcrypt via hashlib + secrets (no extra deps)
+Auth layer — Google OAuth only.
+- No passwords stored anywhere
+- Google verifies the email actually exists and belongs to the user
+- Auto-approve logic: execfunctions.co domain (or any APPROVED_DOMAINS) + admin whitelist
+- Sessions stored server-side in SQLite
 """
 import os
-import sqlite3
 import secrets
-import hashlib
-import json
 from datetime import datetime, timedelta
+import sqlite3
 
 DB_PATH = os.environ.get("DB_PATH", "data/connections.db")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
-APPROVED_DOMAINS = os.environ.get("APPROVED_DOMAINS", "execfunctions.co").split(",")
-SESSION_TTL_HOURS = 72  # sessions last 3 days
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").lower().strip()
+APPROVED_DOMAINS = [d.lower().strip() for d in os.environ.get("APPROVED_DOMAINS", "execfunctions.co").split(",") if d.strip()]
+SESSION_TTL_HOURS = 72
 
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -31,11 +28,13 @@ def init_auth_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
+            name TEXT,
+            picture TEXT,
             is_approved INTEGER DEFAULT 0,
             is_admin INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            approved_at TEXT
+            approved_at TEXT,
+            last_login TEXT
         )
     """)
     c.execute("""
@@ -49,106 +48,71 @@ def init_auth_db():
         )
     """)
     conn.commit()
-
-    # Ensure admin account exists if ADMIN_EMAIL is set
-    if ADMIN_EMAIL:
-        existing = c.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()
-        if not existing:
-            # Admin gets a random initial password — they'll set it on first login
-            placeholder = _hash_password(secrets.token_hex(32))
-            c.execute("""
-                INSERT OR IGNORE INTO users (email, password_hash, is_approved, is_admin)
-                VALUES (?, ?, 1, 1)
-            """, (ADMIN_EMAIL, placeholder))
-            conn.commit()
-
     conn.close()
 
-def _hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000)
-    return f"{salt}:{h.hex()}"
-
-def _verify_password(password: str, stored_hash: str) -> bool:
-    try:
-        salt, h = stored_hash.split(":", 1)
-        check = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000)
-        return check.hex() == h
-    except Exception:
-        return False
-
-def _is_approved_domain(email: str) -> bool:
-    domain = email.split("@")[-1].lower().strip()
-    return domain in [d.lower().strip() for d in APPROVED_DOMAINS]
-
-def register_user(email: str, password: str) -> dict:
-    """Register a new user. Auto-approve if domain is whitelisted."""
+def _is_auto_approved(email: str) -> bool:
     email = email.lower().strip()
-    if not email or "@" not in email:
-        return {"ok": False, "error": "Invalid email address"}
-    if len(password) < 8:
-        return {"ok": False, "error": "Password must be at least 8 characters"}
+    if email == ADMIN_EMAIL:
+        return True
+    domain = email.split("@")[-1]
+    return domain in APPROVED_DOMAINS
 
+def upsert_google_user(email: str, name: str, picture: str) -> dict:
+    """
+    Create or update a user from Google OAuth data.
+    Returns the user dict with approval status.
+    """
+    email = email.lower().strip()
     conn = get_conn()
     c = conn.cursor()
-    existing = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-    if existing:
-        conn.close()
-        return {"ok": False, "error": "An account with this email already exists"}
-
-    is_approved = 1 if (_is_approved_domain(email) or email == ADMIN_EMAIL) else 0
-    is_admin = 1 if email == ADMIN_EMAIL else 0
-    pw_hash = _hash_password(password)
     now = datetime.utcnow().isoformat()
 
-    c.execute("""
-        INSERT INTO users (email, password_hash, is_approved, is_admin, approved_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (email, pw_hash, is_approved, is_admin, now if is_approved else None))
-    conn.commit()
-    conn.close()
+    existing = c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    is_admin = 1 if email == ADMIN_EMAIL else 0
+    auto_approved = _is_auto_approved(email)
 
-    if is_approved:
-        return {"ok": True, "approved": True, "message": "Account created. You can now log in."}
+    if existing:
+        # Update profile info and last login
+        c.execute("""
+            UPDATE users SET name=?, picture=?, last_login=?, is_admin=?
+            WHERE email=?
+        """, (name, picture, now, is_admin, email))
+        # Auto-approve if domain matches but wasn't approved before
+        if auto_approved and not existing["is_approved"]:
+            c.execute("UPDATE users SET is_approved=1, approved_at=? WHERE email=?", (now, email))
+        conn.commit()
+        user = dict(c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone())
     else:
-        return {"ok": True, "approved": False, "message": "Account created. Awaiting admin approval before you can log in."}
+        approved = 1 if auto_approved else 0
+        c.execute("""
+            INSERT INTO users (email, name, picture, is_approved, is_admin, approved_at, last_login)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (email, name, picture, approved, is_admin, now if approved else None, now))
+        conn.commit()
+        user = dict(c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone())
 
-def login_user(email: str, password: str) -> dict:
-    """Validate credentials and return a session token."""
-    email = email.lower().strip()
-    conn = get_conn()
-    c = conn.cursor()
-    user = c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    conn.close()
+    return user
 
-    if not user:
-        conn.close()
-        return {"ok": False, "error": "Invalid email or password"}
-    if not _verify_password(password, user["password_hash"]):
-        conn.close()
-        return {"ok": False, "error": "Invalid email or password"}
-    if not user["is_approved"]:
-        conn.close()
-        return {"ok": False, "error": "Your account is pending approval. The admin has been notified."}
-
-    # Create session
+def create_session(user: dict) -> str:
+    """Create a session token for an approved user. Returns the token."""
     token = secrets.token_urlsafe(32)
     expires = (datetime.utcnow() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
-    c.execute("""
+    conn = get_conn()
+    conn.execute("""
         INSERT INTO sessions (token, user_id, email, is_admin, expires_at)
         VALUES (?, ?, ?, ?, ?)
-    """, (token, user["id"], email, user["is_admin"], expires))
+    """, (token, user["id"], user["email"], user["is_admin"], expires))
     conn.commit()
     conn.close()
-    return {"ok": True, "token": token, "email": email, "is_admin": bool(user["is_admin"])}
+    return token
 
 def validate_session(token: str) -> dict | None:
     """Return session info if valid, None if expired/invalid."""
     if not token:
         return None
     conn = get_conn()
-    session = conn.execute(
-        "SELECT * FROM sessions WHERE token=?", (token,)
-    ).fetchone()
+    session = conn.execute("SELECT * FROM sessions WHERE token=?", (token,)).fetchone()
     conn.close()
     if not session:
         return None
@@ -162,38 +126,33 @@ def logout_user(token: str):
     conn.commit()
     conn.close()
 
-def get_pending_users() -> list:
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT id, email, created_at FROM users WHERE is_approved=0 ORDER BY created_at DESC"
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-def approve_user(user_id: int) -> bool:
-    conn = get_conn()
-    now = datetime.utcnow().isoformat()
-    conn.execute(
-        "UPDATE users SET is_approved=1, approved_at=? WHERE id=?", (now, user_id)
-    )
-    conn.commit()
-    conn.close()
-    return True
-
 def get_all_users() -> list:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, email, is_approved, is_admin, created_at, approved_at FROM users ORDER BY created_at DESC"
+        "SELECT id, email, name, is_approved, is_admin, created_at, approved_at, last_login FROM users ORDER BY created_at DESC"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-def set_password(email: str, new_password: str) -> bool:
-    if len(new_password) < 8:
-        return False
+def get_pending_users() -> list:
     conn = get_conn()
-    pw_hash = _hash_password(new_password)
-    conn.execute("UPDATE users SET password_hash=? WHERE email=?", (pw_hash, email.lower().strip()))
+    rows = conn.execute(
+        "SELECT id, email, name, picture, created_at FROM users WHERE is_approved=0 ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def approve_user(user_id: int):
+    conn = get_conn()
+    now = datetime.utcnow().isoformat()
+    conn.execute("UPDATE users SET is_approved=1, approved_at=? WHERE id=?", (now, user_id))
     conn.commit()
     conn.close()
-    return True
+
+def revoke_user(user_id: int):
+    conn = get_conn()
+    conn.execute("UPDATE users SET is_approved=0 WHERE id=?", (user_id,))
+    # Kill their active sessions
+    conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()

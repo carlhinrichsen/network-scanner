@@ -31,8 +31,11 @@
   .auth-btn:hover { opacity: .85; }
   .auth-error { color: var(--red); font-size: 13px; margin-top: 10px; min-height: 18px; }
   .auth-success { color: var(--green); font-size: 13px; margin-top: 10px; min-height: 18px; }
-  .guest-link { text-align: center; margin-top: 16px; font-size: 13px; color: var(--muted); }
+  .guest-link { text-align: center; margin-top: 16px; font-size: 13px; color: var(--muted); line-height: 1.8; }
   .guest-link a { color: var(--accent2); cursor: pointer; text-decoration: underline; }
+  .google-btn { display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; background: white; color: #333; border: 1px solid #ddd; border-radius: 8px; padding: 12px 20px; font-size: 15px; font-weight: 600; font-family: var(--font); cursor: pointer; text-decoration: none; margin: 20px 0 8px; transition: box-shadow .2s, background .2s; }
+  .google-btn:hover { box-shadow: 0 2px 8px rgba(0,0,0,.2); background: #f8f8f8; }
+  .auth-divider { text-align: center; color: var(--muted); font-size: 12px; margin: 8px 0; }
 
   /* Header */
   .header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -184,26 +187,22 @@
 <!-- AUTH SCREEN -->
 <div class="auth-screen active" id="auth-screen">
   <div class="auth-box">
-    <div class="auth-logo">Network<span>Scanner</span></div>
-    <div class="auth-sub">B2B Network Intelligence — powered by Claude AI</div>
-    <div class="auth-tabs">
-      <div class="auth-tab active" onclick="setAuthTab('login')">Log In</div>
-      <div class="auth-tab" onclick="setAuthTab('register')">Register</div>
+    <div style="text-align:center;margin-bottom:8px">
+      <img src="/static/logo.png" onerror="this.style.display='none'" style="height:48px;width:auto;margin-bottom:12px" alt="">
     </div>
-    <div id="auth-login">
-      <div class="auth-field"><label>Email</label><input type="email" id="login-email" placeholder="you@company.com" onkeydown="if(event.key==='Enter')doLogin()"></div>
-      <div class="auth-field"><label>Password</label><input type="password" id="login-password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"></div>
-      <button class="auth-btn" onclick="doLogin()">Log In →</button>
-      <div class="auth-error" id="login-error"></div>
-    </div>
-    <div id="auth-register" style="display:none">
-      <div class="auth-field"><label>Email</label><input type="email" id="reg-email" placeholder="you@company.com"></div>
-      <div class="auth-field"><label>Password (min 8 chars)</label><input type="password" id="reg-password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doRegister()"></div>
-      <button class="auth-btn" onclick="doRegister()">Create Account →</button>
-      <div class="auth-error" id="reg-error"></div>
-      <div class="auth-success" id="reg-success"></div>
-    </div>
-    <div class="guest-link">Just exploring? <a onclick="enterGuestMode()">Continue as guest</a> — upload your own CSV, nothing stored on our servers</div>
+    <div class="auth-logo" style="text-align:center">Network<span>Scanner</span></div>
+    <div class="auth-sub" style="text-align:center">B2B Network Intelligence — powered by Claude AI</div>
+
+    <div id="auth-error-banner" style="display:none;background:rgba(248,113,113,.1);border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--red)"></div>
+    <div id="auth-pending-banner" style="display:none;background:rgba(251,191,36,.1);border:1px solid var(--yellow);border-radius:10px;padding:14px;margin-bottom:16px;font-size:13px;color:var(--yellow);line-height:1.5"></div>
+
+    <a href="/api/auth/google/login" class="google-btn">
+      <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/><path fill="none" d="M0 0h48v48H0z"/></svg>
+      Sign in with Google
+    </a>
+
+    <div class="auth-divider">— or —</div>
+    <div class="guest-link">Just exploring? <a onclick="enterGuestMode()">Continue as guest</a><br><span style="font-size:11px">Upload your own CSV — nothing stored on our servers</span></div>
   </div>
 </div>
 
@@ -328,41 +327,21 @@ let guestContacts = [];
 let isAdmin = false;
 
 // ── Auth ───────────────────────────────────────────────────────────────────
-function setAuthTab(tab) {
-  document.querySelectorAll('.auth-tab').forEach((t,i) => t.classList.toggle('active', (i===0&&tab==='login')||(i===1&&tab==='register')));
-  document.getElementById('auth-login').style.display = tab==='login' ? '' : 'none';
-  document.getElementById('auth-register').style.display = tab==='register' ? '' : 'none';
-}
-
-async function doLogin() {
-  const email = document.getElementById('login-email').value.trim();
-  const password = document.getElementById('login-password').value;
-  const errEl = document.getElementById('login-error');
-  errEl.textContent = '';
-  if (!email || !password) { errEl.textContent = 'Please fill in both fields.'; return; }
-  try {
-    const r = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,password}), credentials:'include' });
-    const d = await r.json();
-    if (d.ok) { enterPrivateMode(d.email, d.is_admin); }
-    else { errEl.textContent = d.error || 'Login failed'; }
-  } catch(e) { errEl.textContent = 'Connection error. Please try again.'; }
-}
-
-async function doRegister() {
-  const email = document.getElementById('reg-email').value.trim();
-  const password = document.getElementById('reg-password').value;
-  const errEl = document.getElementById('reg-error');
-  const okEl = document.getElementById('reg-success');
-  errEl.textContent = ''; okEl.textContent = '';
-  if (!email || !password) { errEl.textContent = 'Please fill in both fields.'; return; }
-  try {
-    const r = await fetch('/api/auth/register', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,password}) });
-    const d = await r.json();
-    if (d.ok) {
-      if (d.approved) { okEl.textContent = d.message + ' Logging you in...'; setTimeout(doLogin, 1200); }
-      else { okEl.textContent = d.message; }
-    } else { errEl.textContent = d.error || 'Registration failed'; }
-  } catch(e) { errEl.textContent = 'Connection error. Please try again.'; }
+function handleOAuthRedirectParams() {
+  const params = new URLSearchParams(window.location.search);
+  const error = params.get('error');
+  const pending = params.get('pending');
+  if (error) {
+    const el = document.getElementById('auth-error-banner');
+    el.style.display = 'block';
+    el.textContent = decodeURIComponent(error);
+    window.history.replaceState({}, '', '/');
+  } else if (pending) {
+    const el = document.getElementById('auth-pending-banner');
+    el.style.display = 'block';
+    el.innerHTML = '⏳ <strong>Access pending approval.</strong> Your account has been created. An admin will review and approve your access shortly.';
+    window.history.replaceState({}, '', '/');
+  }
 }
 
 async function doLogout() {
@@ -417,7 +396,7 @@ function enterGuestMode() {
   appendMessage('assistant', '👤 **Guest mode** — upload your LinkedIn CSV to get started. Your data stays in your browser and is never stored on our servers.');
 }
 
-window.addEventListener('load', () => { checkExistingSession(); });
+window.addEventListener('load', () => { handleOAuthRedirectParams(); checkExistingSession(); });
 
 // ── Stats ──────────────────────────────────────────────────────────────────
 async function loadStats() {
@@ -703,7 +682,8 @@ async function openAdmin() {
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           ${u.is_admin ? '<span class="user-status status-admin">Admin</span>' :
-            u.is_approved ? '<span class="user-status status-approved">Approved</span>' :
+            u.is_approved ? `<span class="user-status status-approved">Approved</span>
+             <button class="action-btn" style="padding:4px 10px;font-size:12px;color:var(--red);border-color:var(--red)" onclick="revokeUser(${u.id},this)">Revoke</button>` :
             `<span class="user-status status-pending">Pending</span>
              <button class="action-btn primary" style="padding:4px 10px;font-size:12px" onclick="approveUser(${u.id},this)">Approve</button>`}
         </div>
@@ -711,6 +691,7 @@ async function openAdmin() {
   } catch(e){listEl.innerHTML='<div style="color:var(--red)">Failed to load users.</div>';}
 }
 async function approveUser(id,btn){btn.disabled=true;btn.textContent='...';await fetch(`/api/admin/approve/${id}`,{method:'POST',credentials:'include'});openAdmin();}
+async function revokeUser(id,btn){btn.disabled=true;btn.textContent='...';await fetch(`/api/admin/revoke/${id}`,{method:'POST',credentials:'include'});openAdmin();}
 function closeAdmin(){document.getElementById('admin-overlay').classList.remove('active');}
 </script>
 </body>

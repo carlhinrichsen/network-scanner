@@ -2,12 +2,14 @@ import os
 import io
 import csv
 import json
+import secrets
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import httpx
 
 from database import init_db, upsert_connections, get_all_connections, get_stats, save_enrichment, log_upload
 from csv_parser import parse_linkedin_csv
@@ -16,10 +18,25 @@ from ai_engine import (
     compare_icps, enrich_contact, chat_response
 )
 from auth import (
-    init_auth_db, register_user, login_user, validate_session,
-    logout_user, get_pending_users, approve_user, get_all_users, set_password
+    init_auth_db, upsert_google_user, create_session, validate_session,
+    logout_user, get_pending_users, approve_user, revoke_user, get_all_users
 )
 
+# ---------------------------------------------------------------------------
+# Google OAuth config
+# ---------------------------------------------------------------------------
+GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+APP_BASE_URL         = os.environ.get("APP_BASE_URL", "https://shrimpsandwich.onrender.com")
+GOOGLE_REDIRECT_URI  = f"{APP_BASE_URL}/api/auth/google/callback"
+
+GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
 app = FastAPI(title="Network Scanner")
 
 app.add_middleware(
@@ -39,7 +56,7 @@ async def startup():
     init_auth_db()
 
 # ---------------------------------------------------------------------------
-# Auth helpers
+# Session helpers
 # ---------------------------------------------------------------------------
 
 def get_session(request: Request) -> dict | None:
@@ -59,27 +76,89 @@ def require_admin(request: Request) -> dict:
     return session
 
 # ---------------------------------------------------------------------------
-# Auth endpoints
+# Google OAuth endpoints
 # ---------------------------------------------------------------------------
 
-class AuthRequest(BaseModel):
-    email: str
-    password: str
+@app.get("/api/auth/google/login")
+async def google_login(response: Response):
+    """Redirect the browser to Google's OAuth consent screen."""
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(500, "Google OAuth not configured. Set GOOGLE_CLIENT_ID env var.")
 
-@app.post("/api/auth/register")
-async def register(req: AuthRequest):
-    return register_user(req.email, req.password)
+    state = secrets.token_urlsafe(16)
+    params = {
+        "client_id":     GOOGLE_CLIENT_ID,
+        "redirect_uri":  GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "state":         state,
+        "prompt":        "select_account",
+    }
+    from urllib.parse import urlencode
+    url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+    resp = RedirectResponse(url)
+    # Store state in a short-lived cookie for CSRF protection
+    resp.set_cookie("oauth_state", state, httponly=True, samesite="lax", max_age=600)
+    return resp
 
-@app.post("/api/auth/login")
-async def login(req: AuthRequest, response: Response):
-    result = login_user(req.email, req.password)
-    if result.get("ok"):
-        response.set_cookie(
-            "ns_token", result["token"],
-            httponly=True, samesite="lax",
-            max_age=72 * 3600
+@app.get("/api/auth/google/callback")
+async def google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """Handle Google's redirect back after user authenticates."""
+    if error:
+        return RedirectResponse(f"/?auth_error={error}")
+
+    # CSRF check
+    stored_state = request.cookies.get("oauth_state", "")
+    if stored_state and state and stored_state != state:
+        return RedirectResponse("/?auth_error=state_mismatch")
+
+    # Exchange code for tokens
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(GOOGLE_TOKEN_URL, data={
+            "code":          code,
+            "client_id":     GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri":  GOOGLE_REDIRECT_URI,
+            "grant_type":    "authorization_code",
+        })
+        if token_resp.status_code != 200:
+            return RedirectResponse("/?auth_error=token_exchange_failed")
+        tokens = token_resp.json()
+
+        # Fetch user info from Google
+        userinfo_resp = await client.get(
+            GOOGLE_USERINFO,
+            headers={"Authorization": f"Bearer {tokens['access_token']}"}
         )
-    return result
+        if userinfo_resp.status_code != 200:
+            return RedirectResponse("/?auth_error=userinfo_failed")
+        userinfo = userinfo_resp.json()
+
+    email   = userinfo.get("email", "")
+    name    = userinfo.get("name", "")
+    picture = userinfo.get("picture", "")
+
+    if not email:
+        return RedirectResponse("/?auth_error=no_email")
+
+    # Upsert user in DB
+    user = upsert_google_user(email, name, picture)
+
+    if not user["is_approved"]:
+        # Not approved yet — redirect with a pending message
+        return RedirectResponse(f"/?auth_pending=1&email={email}")
+
+    # Approved — create session and redirect home
+    token = create_session(user)
+    resp = RedirectResponse("/")
+    resp.set_cookie(
+        "ns_token", token,
+        httponly=True, samesite="lax",
+        max_age=72 * 3600,
+        secure=APP_BASE_URL.startswith("https")
+    )
+    resp.delete_cookie("oauth_state")
+    return resp
 
 @app.post("/api/auth/logout")
 async def logout(request: Request, response: Response):
@@ -94,15 +173,11 @@ async def me(request: Request):
     session = get_session(request)
     if not session:
         return {"authenticated": False}
-    return {"authenticated": True, "email": session["email"], "is_admin": bool(session["is_admin"])}
-
-@app.post("/api/auth/set-password")
-async def change_password(req: AuthRequest, request: Request):
-    session = require_session(request)
-    if session["email"] != req.email.lower().strip() and not session["is_admin"]:
-        raise HTTPException(403, "Cannot change another user's password")
-    ok = set_password(req.email, req.password)
-    return {"ok": ok}
+    return {
+        "authenticated": True,
+        "email":    session["email"],
+        "is_admin": bool(session["is_admin"])
+    }
 
 # ---------------------------------------------------------------------------
 # Admin endpoints
@@ -124,6 +199,12 @@ async def admin_approve(user_id: int, request: Request):
     approve_user(user_id)
     return {"ok": True}
 
+@app.post("/api/admin/revoke/{user_id}")
+async def admin_revoke(user_id: int, request: Request):
+    require_admin(request)
+    revoke_user(user_id)
+    return {"ok": True}
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -132,7 +213,7 @@ class ChatMessage(BaseModel):
     message: str
     history: list = []
     mode: str = "search"
-    guest_data: list = []  # guest mode passes their session data directly
+    guest_data: list = []
 
 class EnrichRequest(BaseModel):
     linkedin_urls: list[str]
@@ -141,7 +222,7 @@ class ExportRequest(BaseModel):
     results: list
 
 # ---------------------------------------------------------------------------
-# Upload endpoint — PRIVATE (requires login)
+# Upload — private (requires login)
 # ---------------------------------------------------------------------------
 
 @app.post("/api/upload")
@@ -154,13 +235,12 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
         rows = parse_linkedin_csv(content)
     except Exception as e:
         raise HTTPException(400, f"Failed to parse CSV: {str(e)}")
-
     result = upsert_connections(rows)
     log_upload(file.filename, len(rows), result["added"], result["updated"], result["skipped"])
     return {"success": True, "filename": file.filename, "total_parsed": len(rows), **result}
 
 # ---------------------------------------------------------------------------
-# Guest upload endpoint — session only, returns data, does NOT write to DB
+# Guest upload — session only, never writes to DB
 # ---------------------------------------------------------------------------
 
 @app.post("/api/guest/upload")
@@ -172,11 +252,10 @@ async def guest_upload(file: UploadFile = File(...)):
         rows = parse_linkedin_csv(content)
     except Exception as e:
         raise HTTPException(400, f"Failed to parse CSV: {str(e)}")
-    # Return the parsed rows directly — client holds them in memory
     return {"success": True, "total_parsed": len(rows), "contacts": rows}
 
 # ---------------------------------------------------------------------------
-# Stats endpoint — PRIVATE
+# Stats — private
 # ---------------------------------------------------------------------------
 
 @app.get("/api/stats")
@@ -185,20 +264,17 @@ async def stats(request: Request):
     return get_stats()
 
 # ---------------------------------------------------------------------------
-# Chat / Search — works in both private and guest mode
+# Chat / Search — private + guest
 # ---------------------------------------------------------------------------
 
 @app.post("/api/chat")
 async def chat(req: ChatMessage, request: Request):
     session = get_session(request)
 
-    # Determine data source
     if session:
-        # Private mode: use persistent DB
         connections = get_all_connections()
         db_context = f"{len(connections)} stored contacts"
     elif req.guest_data:
-        # Guest mode: use data passed from client
         connections = req.guest_data
         db_context = f"{len(connections)} uploaded contacts (guest session)"
     else:
@@ -259,7 +335,7 @@ async def chat(req: ChatMessage, request: Request):
         return {"type": "chat", "message": msg, "results": [], "total": 0}
 
 # ---------------------------------------------------------------------------
-# Enrichment — PRIVATE only
+# Enrichment — private only
 # ---------------------------------------------------------------------------
 
 @app.post("/api/enrich")
@@ -287,12 +363,12 @@ async def enrich(req: EnrichRequest, request: Request):
     for company, urls in to_enrich.items():
         for url in urls:
             data = enrich_contact(url, company)
-            location = data.get("location", "")
-            industry = data.get("industry", "")
+            location    = data.get("location", "")
+            industry    = data.get("industry", "")
             description = data.get("description", "")
 
             if (not industry or not description) and company in company_cache:
-                industry = industry or company_cache[company].get("industry", "")
+                industry    = industry    or company_cache[company].get("industry", "")
                 description = description or company_cache[company].get("description", "")
 
             if company not in company_cache:
@@ -302,16 +378,16 @@ async def enrich(req: EnrichRequest, request: Request):
             enriched_count += 1
 
         results.append({
-            "company": company,
-            "industry": company_cache.get(company, {}).get("industry", ""),
-            "description": company_cache.get(company, {}).get("description", ""),
+            "company":          company,
+            "industry":         company_cache.get(company, {}).get("industry", ""),
+            "description":      company_cache.get(company, {}).get("description", ""),
             "contacts_updated": len(urls)
         })
 
     return {
-        "message": f"Enriched {enriched_count} contacts across {len(to_enrich)} companies.",
+        "message":  f"Enriched {enriched_count} contacts across {len(to_enrich)} companies.",
         "enriched": enriched_count,
-        "details": results
+        "details":  results
     }
 
 # ---------------------------------------------------------------------------
@@ -337,12 +413,15 @@ async def export_csv(req: ExportRequest):
     )
 
 # ---------------------------------------------------------------------------
-# Serve frontend
+# Serve frontend (catch-all)
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/{path:path}", response_class=HTMLResponse)
 async def root(path: str = ""):
+    # Don't catch API or static routes
+    if path.startswith("api/") or path.startswith("static/"):
+        raise HTTPException(404)
     html_path = os.path.join(static_dir, "index.html")
     if os.path.exists(html_path):
         with open(html_path) as f:
