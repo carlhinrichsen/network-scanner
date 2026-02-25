@@ -105,7 +105,7 @@ def score_connection(conn: dict, filters: dict) -> float:
         for concept in pc:
             words = concept.lower().split()
             if any(w in position for w in words):
-                score += 1.0
+                score += 2.0
                 break
 
     # Seniority match
@@ -141,7 +141,7 @@ def score_connection(conn: dict, filters: dict) -> float:
             return 0.0
 
     if weights == 0:
-        return 0.5  # No criteria = everything passes
+        return 0.0  # No criteria extracted = no match
     return min(score / weights, 1.0)
 
 
@@ -163,6 +163,8 @@ def filter_connections(connections: list[dict], filters: dict) -> list[dict]:
 ICP_SYSTEM = """You are a B2B market analyst. The user will describe 2-3 Ideal Customer Profiles (ICPs).
 For each ICP, extract filter criteria in the same JSON format as the filter schema.
 Return a JSON array, one object per ICP, each with an added "icp_name" string field.
+
+IMPORTANT: Be specific and restrictive with keywords. Each ICP must have meaningful position_keywords and/or position_concepts that clearly differentiate it. Set confidence_threshold to 0.65.
 Return ONLY the JSON array."""
 
 def extract_icps(user_message: str) -> list[dict]:
@@ -184,8 +186,10 @@ def compare_icps(connections: list[dict], icp_descriptions: str) -> list[dict]:
     icps = extract_icps(icp_descriptions)
     results = []
     for icp in icps:
+        # Enforce minimum threshold of 0.6 for ICP mode
+        icp["confidence_threshold"] = max(icp.get("confidence_threshold", 0.65), 0.6)
         matched = filter_connections(connections, icp)
-        high_confidence = [m for m in matched if m["_score"] >= 0.7]
+        high_confidence = [m for m in matched if m["_score"] >= 0.75]
         results.append({
             "icp_name": icp.get("icp_name", "ICP"),
             "intent_summary": icp.get("intent_summary", ""),
