@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Network Scanner</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3250;
+    --accent: #6c63ff;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --yellow: #fbbf24;
+    --red: #f87171;
+    --text: #e2e8f0;
+    --muted: #8892b0;
+    --font: 'Inter', -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Header */
+  .header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .logo { font-size: 18px; font-weight: 700; color: var(--accent2); letter-spacing: -0.5px; }
+  .logo span { color: var(--muted); font-weight: 400; }
+  .stats-bar { display: flex; gap: 20px; }
+  .stat { text-align: center; }
+  .stat-value { font-size: 18px; font-weight: 700; color: var(--accent2); }
+  .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .upload-btn { background: var(--accent); color: white; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; transition: opacity 0.2s; }
+  .upload-btn:hover { opacity: 0.85; }
+  #file-input { display: none; }
+
+  /* Layout */
+  .app { display: flex; flex: 1; overflow: hidden; }
+
+  /* Chat panel */
+  .chat-panel { width: 420px; min-width: 320px; display: flex; flex-direction: column; border-right: 1px solid var(--border); flex-shrink: 0; }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .chat-messages::-webkit-scrollbar { width: 4px; }
+  .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .msg { max-width: 90%; }
+  .msg.user { align-self: flex-end; }
+  .msg.assistant { align-self: flex-start; }
+  .msg-bubble { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
+  .msg.user .msg-bubble { background: var(--accent); color: white; border-bottom-right-radius: 4px; }
+  .msg.assistant .msg-bubble { background: var(--surface2); color: var(--text); border-bottom-left-radius: 4px; border: 1px solid var(--border); }
+  .msg-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .msg.user .msg-meta { text-align: right; }
+
+  .chat-input-area { padding: 12px; border-top: 1px solid var(--border); background: var(--surface); }
+  .mode-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .mode-tab { padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; transition: all 0.2s; }
+  .mode-tab.active { background: var(--accent); border-color: var(--accent); color: white; font-weight: 600; }
+  .input-row { display: flex; gap: 8px; }
+  .chat-input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; color: var(--text); font-size: 14px; resize: none; font-family: var(--font); transition: border-color 0.2s; }
+  .chat-input:focus { outline: none; border-color: var(--accent); }
+  .send-btn { background: var(--accent); color: white; border: none; width: 40px; height: 40px; border-radius: 10px; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; transition: opacity 0.2s; flex-shrink: 0; }
+  .send-btn:hover { opacity: 0.85; }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Results panel */
+  .results-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .results-header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; background: var(--surface); }
+  .results-title { font-size: 15px; font-weight: 600; }
+  .results-count { font-size: 13px; color: var(--muted); }
+  .results-actions { display: flex; gap: 8px; }
+  .action-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+  .action-btn:hover { border-color: var(--accent); color: var(--accent2); }
+  .action-btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  .action-btn.primary:hover { opacity: 0.85; }
+  .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Table */
+  .table-wrapper { flex: 1; overflow: auto; }
+  .table-wrapper::-webkit-scrollbar { width: 6px; height: 6px; }
+  .table-wrapper::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th { background: var(--surface2); padding: 10px 14px; text-align: left; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: var(--surface2); }
+  .score-badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 700; }
+  .score-high { background: rgba(52,211,153,0.15); color: var(--green); }
+  .score-mid { background: rgba(251,191,36,0.15); color: var(--yellow); }
+  .score-low { background: rgba(248,113,113,0.15); color: var(--red); }
+  .linkedin-link { color: var(--accent2); text-decoration: none; font-size: 12px; }
+  .linkedin-link:hover { text-decoration: underline; }
+  .enrich-icon { cursor: pointer; color: var(--muted); font-size: 12px; margin-left: 6px; }
+  .enrich-icon:hover { color: var(--yellow); }
+  .enriched-pill { font-size: 10px; background: rgba(107,99,255,0.2); color: var(--accent2); padding: 1px 6px; border-radius: 10px; margin-left: 6px; }
+
+  /* Empty state */
+  .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); gap: 12px; padding: 40px; text-align: center; }
+  .empty-state .icon { font-size: 48px; opacity: 0.4; }
+  .empty-state h3 { font-size: 18px; color: var(--text); }
+  .empty-state p { font-size: 14px; max-width: 300px; line-height: 1.6; }
+
+  /* ICP comparison */
+  .icp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; padding: 20px; overflow-y: auto; }
+  .icp-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .icp-card-title { font-size: 15px; font-weight: 700; color: var(--accent2); margin-bottom: 8px; }
+  .icp-card-desc { font-size: 13px; color: var(--muted); margin-bottom: 16px; line-height: 1.5; }
+  .icp-metric { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .icp-metric:last-child { border-bottom: none; }
+  .icp-metric-label { font-size: 12px; color: var(--muted); }
+  .icp-metric-value { font-size: 16px; font-weight: 700; color: var(--text); }
+  .icp-metric-value.highlight { color: var(--green); }
+  .icp-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+  .icp-tag { font-size: 11px; background: var(--surface); border: 1px solid var(--border); padding: 2px 8px; border-radius: 10px; color: var(--muted); }
+
+  /* Upload overlay */
+  .upload-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }
+  .upload-overlay.active { display: flex; }
+  .upload-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; max-width: 440px; width: 90%; text-align: center; }
+  .upload-modal h2 { font-size: 20px; margin-bottom: 8px; }
+  .upload-modal p { color: var(--muted); font-size: 14px; margin-bottom: 24px; line-height: 1.6; }
+  .upload-drop { border: 2px dashed var(--border); border-radius: 12px; padding: 32px; cursor: pointer; transition: border-color 0.2s; }
+  .upload-drop:hover { border-color: var(--accent); }
+  .upload-drop .drop-icon { font-size: 36px; margin-bottom: 12px; }
+  .upload-drop p { margin: 0; }
+  .upload-progress { margin-top: 16px; display: none; }
+  .progress-bar { height: 4px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+  .upload-result { margin-top: 16px; padding: 16px; background: var(--surface2); border-radius: 10px; text-align: left; display: none; }
+  .upload-result-row { display: flex; justify-content: space-between; font-size: 14px; padding: 4px 0; }
+  .close-modal { margin-top: 20px; background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 24px; border-radius: 8px; cursor: pointer; }
+
+  /* Enrichment confirm */
+  .confirm-banner { display: none; background: rgba(251,191,36,0.1); border: 1px solid var(--yellow); border-radius: 10px; padding: 12px 16px; margin: 12px 20px; font-size: 13px; }
+  .confirm-banner.active { display: flex; align-items: center; gap: 12px; }
+  .confirm-banner p { flex: 1; color: var(--yellow); }
+  .confirm-banner .confirm-actions { display: flex; gap: 8px; }
+
+  /* Preview notice */
+  .preview-notice { padding: 8px 20px; background: rgba(107,99,255,0.1); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--accent2); display: none; }
+
+  /* Spinner */
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Mobile */
+  @media (max-width: 768px) {
+    .app { flex-direction: column; }
+    .chat-panel { width: 100%; height: 50vh; border-right: none; border-bottom: 1px solid var(--border); }
+    .stats-bar { gap: 12px; }
+    .stat-value { font-size: 15px; }
+    .header { padding: 10px 14px; }
+    .logo { font-size: 15px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Upload overlay -->
+<div class="upload-overlay" id="upload-overlay">
+  <div class="upload-modal">
+    <h2>Upload LinkedIn Connections</h2>
+    <p>Export your connections from LinkedIn (Settings → Data Privacy → Get a copy of your data → Connections). Upload the CSV here.</p>
+    <div class="upload-drop" id="upload-drop" onclick="document.getElementById('file-input').click()">
+      <div class="drop-icon">📁</div>
+      <p style="font-weight:600;margin-bottom:4px">Click to select CSV file</p>
+      <p style="font-size:12px;color:var(--muted)">or drag and drop</p>
+    </div>
+    <input type="file" id="file-input" accept=".csv">
+    <div class="upload-progress" id="upload-progress">
+      <p style="font-size:13px;color:var(--muted)" id="upload-status">Uploading...</p>
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+    </div>
+    <div class="upload-result" id="upload-result"></div>
+    <button class="close-modal" onclick="closeUpload()">Close</button>
+  </div>
+</div>
+
+<!-- Header -->
+<div class="header">
+  <div class="logo">Network<span>Scanner</span></div>
+  <div class="stats-bar">
+    <div class="stat"><div class="stat-value" id="stat-total">–</div><div class="stat-label">Contacts</div></div>
+    <div class="stat"><div class="stat-value" id="stat-companies">–</div><div class="stat-label">Companies</div></div>
+    <div class="stat"><div class="stat-value" id="stat-enriched">–</div><div class="stat-label">Enriched</div></div>
+  </div>
+  <button class="upload-btn" onclick="openUpload()">⬆ Upload CSV</button>
+</div>
+
+<div class="app">
+  <!-- Chat panel -->
+  <div class="chat-panel">
+    <div class="chat-messages" id="chat-messages">
+      <div class="msg assistant">
+        <div class="msg-bubble">
+          👋 Hi! I'm your Network Scanner. Upload your LinkedIn connections CSV to get started, then ask me anything like:<br><br>
+          • <em>"Find me heads of sales at SaaS companies"</em><br>
+          • <em>"Show VPs and Directors at fintech firms"</em><br>
+          • <em>"Compare 3 ICPs: CMOs at enterprise, growth-stage founders, and heads of product"</em>
+        </div>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <div class="mode-tabs">
+        <button class="mode-tab active" data-mode="search" onclick="setMode('search')">🔍 Search</button>
+        <button class="mode-tab" data-mode="icp" onclick="setMode('icp')">🎯 ICP Compare</button>
+        <button class="mode-tab" data-mode="chat" onclick="setMode('chat')">💬 Chat</button>
+      </div>
+      <div class="input-row">
+        <textarea class="chat-input" id="chat-input" rows="2" placeholder="Ask me anything about your network..." onkeydown="handleKey(event)"></textarea>
+        <button class="send-btn" id="send-btn" onclick="sendMessage()">➤</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results panel -->
+  <div class="results-panel">
+    <div class="results-header">
+      <div>
+        <div class="results-title" id="results-title">Results</div>
+        <div class="results-count" id="results-count">Run a search to see contacts</div>
+      </div>
+      <div class="results-actions">
+        <button class="action-btn" id="enrich-btn" onclick="requestEnrich()" disabled>✨ Enrich (online)</button>
+        <button class="action-btn primary" id="export-btn" onclick="exportCSV()" disabled>⬇ Export CSV</button>
+      </div>
+    </div>
+
+    <div class="confirm-banner" id="confirm-banner">
+      <p id="confirm-text"></p>
+      <div class="confirm-actions">
+        <button class="action-btn primary" onclick="confirmEnrich()">Yes, enrich</button>
+        <button class="action-btn" onclick="cancelEnrich()">Cancel</button>
+      </div>
+    </div>
+
+    <div class="preview-notice" id="preview-notice"></div>
+
+    <div id="results-body" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+      <div class="empty-state">
+        <div class="icon">🕸️</div>
+        <h3>Your network awaits</h3>
+        <p>Upload your LinkedIn CSV and start a conversation to discover your best connections.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// State
+let currentMode = 'search';
+let conversationHistory = [];
+let currentResults = [];
+let currentFilters = null;
+let pendingEnrichUrls = [];
+
+// API base
+const API = '';
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+async function loadStats() {
+  try {
+    const r = await fetch(`${API}/api/stats`);
+    const d = await r.json();
+    document.getElementById('stat-total').textContent = d.total.toLocaleString();
+    document.getElementById('stat-companies').textContent = d.companies.toLocaleString();
+    document.getElementById('stat-enriched').textContent = d.enriched.toLocaleString();
+  } catch(e) {}
+}
+loadStats();
+setInterval(loadStats, 30000);
+
+// ---------------------------------------------------------------------------
+// Mode tabs
+// ---------------------------------------------------------------------------
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.mode-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+  const placeholders = {
+    search: 'e.g. "Find heads of sales at fintech companies"',
+    icp: 'Describe 2-3 ICPs to compare, e.g. "ICP1: CMOs at enterprise SaaS, ICP2: Founders at AI startups, ICP3: VPs of Product at scale-ups"',
+    chat: 'Ask anything about your network or get BD strategy advice...'
+  };
+  document.getElementById('chat-input').placeholder = placeholders[mode];
+}
+
+// ---------------------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------------------
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  input.value = '';
+  appendMessage('user', msg);
+
+  const btn = document.getElementById('send-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div>';
+
+  const typingEl = appendMessage('assistant', '<div class="spinner"></div>', true);
+
+  try {
+    const res = await fetch(`${API}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, history: conversationHistory, mode: currentMode })
+    });
+    const data = await res.json();
+
+    // Update history
+    conversationHistory.push({ role: 'user', content: msg });
+    conversationHistory.push({ role: 'assistant', content: data.message });
+    if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20);
+
+    // Update message
+    typingEl.querySelector('.msg-bubble').innerHTML = formatMessage(data.message);
+    typingEl.querySelector('.msg-meta').textContent = new Date().toLocaleTimeString();
+
+    // Handle response types
+    if (data.type === 'search') {
+      currentResults = data.results || [];
+      currentFilters = data.filters;
+      renderTable(currentResults, data.total);
+      document.getElementById('export-btn').disabled = currentResults.length === 0;
+      document.getElementById('enrich-btn').disabled = currentResults.length === 0;
+    } else if (data.type === 'icp_comparison') {
+      renderICPComparison(data.icp_results);
+    }
+
+  } catch(e) {
+    typingEl.querySelector('.msg-bubble').textContent = '❌ Error connecting to server. Please try again.';
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '➤';
+}
+
+function appendMessage(role, content, isTyping = false) {
+  const container = document.getElementById('chat-messages');
+  const el = document.createElement('div');
+  el.className = `msg ${role}`;
+  el.innerHTML = `<div class="msg-bubble">${isTyping ? content : formatMessage(content)}</div><div class="msg-meta">${isTyping ? '' : new Date().toLocaleTimeString()}</div>`;
+  container.appendChild(el);
+  container.scrollTop = container.scrollHeight;
+  return el;
+}
+
+function formatMessage(text) {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/\n/g, '<br>');
+}
+
+// ---------------------------------------------------------------------------
+// Table
+// ---------------------------------------------------------------------------
+function renderTable(results, total) {
+  const body = document.getElementById('results-body');
+  const preview = document.getElementById('preview-notice');
+  const title = document.getElementById('results-title');
+  const count = document.getElementById('results-count');
+
+  title.textContent = `Search Results`;
+  count.textContent = `${total.toLocaleString()} contacts matched`;
+
+  if (total > 20) {
+    preview.style.display = 'block';
+    preview.textContent = `Showing first 20 of ${total.toLocaleString()} results. Export CSV for full list.`;
+  } else {
+    preview.style.display = 'none';
+  }
+
+  if (results.length === 0) {
+    body.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><h3>No matches found</h3><p>Try broadening your search or use different keywords. I can help you refine it.</p></div>`;
+    return;
+  }
+
+  const displayRows = results.slice(0, 20);
+
+  body.innerHTML = `
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Match</th>
+            <th>Name</th>
+            <th>Position</th>
+            <th>Company</th>
+            <th>Industry</th>
+            <th>Connected</th>
+            <th>LinkedIn</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${displayRows.map(r => renderRow(r)).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderRow(r) {
+  const score = r._score || 0;
+  const scoreClass = score >= 0.8 ? 'score-high' : score >= 0.6 ? 'score-mid' : 'score-low';
+  const scorePct = Math.round(score * 100);
+  const name = [r.first_name, r.last_name].filter(Boolean).join(' ');
+  const enriched = r.enriched_at ? `<span class="enriched-pill">✓ enriched</span>` : '';
+  const industry = r.enriched_industry || '–';
+
+  return `
+    <tr>
+      <td><span class="score-badge ${scoreClass}">${scorePct}%</span></td>
+      <td style="white-space:nowrap;font-weight:500">${escHtml(name)}</td>
+      <td style="max-width:200px">${escHtml(r.position || '–')}${enriched}</td>
+      <td style="white-space:nowrap">${escHtml(r.company || '–')}</td>
+      <td style="color:var(--muted);font-size:12px">${escHtml(industry)}</td>
+      <td style="color:var(--muted);font-size:12px;white-space:nowrap">${r.connected_on || '–'}</td>
+      <td><a class="linkedin-link" href="${r.linkedin_url}" target="_blank">↗ View</a></td>
+    </tr>
+  `;
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ---------------------------------------------------------------------------
+// ICP Comparison
+// ---------------------------------------------------------------------------
+function renderICPComparison(icps) {
+  const body = document.getElementById('results-body');
+  const preview = document.getElementById('preview-notice');
+  const title = document.getElementById('results-title');
+  const count = document.getElementById('results-count');
+
+  preview.style.display = 'none';
+  title.textContent = 'ICP Comparison';
+  count.textContent = `${icps.length} profiles compared (quick estimate)`;
+
+  body.innerHTML = `<div class="icp-grid">${icps.map(renderICPCard).join('')}</div>`;
+  document.getElementById('export-btn').disabled = true;
+  document.getElementById('enrich-btn').disabled = true;
+}
+
+function renderICPCard(icp) {
+  const topCos = (icp.top_companies || []).slice(0,5).map(c => `<span class="icp-tag">${escHtml(c)}</span>`).join('');
+  const topPos = (icp.top_positions || []).slice(0,5).map(p => `<span class="icp-tag">${escHtml(p)}</span>`).join('');
+  const matchRate = icp.total_matches > 0 ? Math.round(icp.high_confidence_matches / icp.total_matches * 100) : 0;
+
+  return `
+    <div class="icp-card">
+      <div class="icp-card-title">🎯 ${escHtml(icp.icp_name)}</div>
+      <div class="icp-card-desc">${escHtml(icp.intent_summary)}</div>
+      <div class="icp-metric">
+        <span class="icp-metric-label">Total matches</span>
+        <span class="icp-metric-value highlight">${icp.total_matches}</span>
+      </div>
+      <div class="icp-metric">
+        <span class="icp-metric-label">High confidence</span>
+        <span class="icp-metric-value">${icp.high_confidence_matches} <span style="color:var(--muted);font-size:12px">(${matchRate}%)</span></span>
+      </div>
+      <div style="margin-top:12px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Top Companies</div>
+      <div class="icp-tags">${topCos || '<span style="color:var(--muted);font-size:12px">–</span>'}</div>
+      <div style="margin-top:12px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Top Roles</div>
+      <div class="icp-tags">${topPos || '<span style="color:var(--muted);font-size:12px">–</span>'}</div>
+      <button class="action-btn" style="margin-top:16px;width:100%" onclick="searchICP('${escHtml(icp.icp_name)}')">
+        Search this ICP →
+      </button>
+    </div>
+  `;
+}
+
+function searchICP(icpName) {
+  setMode('search');
+  document.getElementById('chat-input').value = `Find me all contacts matching the "${icpName}" ICP profile`;
+  sendMessage();
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment
+// ---------------------------------------------------------------------------
+function requestEnrich() {
+  if (currentResults.length === 0) return;
+  const unenriched = currentResults.filter(r => !r.enriched_at);
+  if (unenriched.length === 0) {
+    appendMessage('assistant', 'All contacts in this result set are already enriched! 🎉');
+    return;
+  }
+  const uniqueCompanies = [...new Set(unenriched.map(r => r.company).filter(Boolean))];
+  pendingEnrichUrls = unenriched.map(r => r.linkedin_url);
+
+  const banner = document.getElementById('confirm-banner');
+  document.getElementById('confirm-text').textContent =
+    `This will look up ${uniqueCompanies.length} companies online (${unenriched.length} contacts). This uses Tavily search credits. Proceed?`;
+  banner.classList.add('active');
+}
+
+async function confirmEnrich() {
+  document.getElementById('confirm-banner').classList.remove('active');
+  if (pendingEnrichUrls.length === 0) return;
+
+  appendMessage('assistant', `🔍 Looking up ${pendingEnrichUrls.length} contacts online... this may take a moment.`);
+  document.getElementById('enrich-btn').disabled = true;
+
+  try {
+    const res = await fetch(`${API}/api/enrich`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ linkedin_urls: pendingEnrichUrls })
+    });
+    const data = await res.json();
+    appendMessage('assistant', `✅ ${data.message}`);
+    loadStats();
+
+    // Re-run last search to show enriched data
+    if (currentFilters) {
+      appendMessage('assistant', 'Refreshing results with enriched data...');
+      sendMessage();
+    }
+  } catch(e) {
+    appendMessage('assistant', '❌ Enrichment failed. Please try again.');
+  }
+
+  document.getElementById('enrich-btn').disabled = false;
+  pendingEnrichUrls = [];
+}
+
+function cancelEnrich() {
+  document.getElementById('confirm-banner').classList.remove('active');
+  pendingEnrichUrls = [];
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+function exportCSV() {
+  const lastSearch = conversationHistory.filter(m => m.role === 'user').pop();
+  const query = lastSearch ? encodeURIComponent(lastSearch.content) : '';
+  window.location.href = `${API}/api/export${query ? '?query=' + query : ''}`;
+}
+
+// ---------------------------------------------------------------------------
+// Upload
+// ---------------------------------------------------------------------------
+function openUpload() {
+  document.getElementById('upload-overlay').classList.add('active');
+}
+function closeUpload() {
+  document.getElementById('upload-overlay').classList.remove('active');
+  document.getElementById('upload-result').style.display = 'none';
+  document.getElementById('upload-progress').style.display = 'none';
+  loadStats();
+}
+
+// File input handler
+document.getElementById('file-input').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  await doUpload(file);
+  e.target.value = '';
+});
+
+// Drag and drop
+const dropZone = document.getElementById('upload-drop');
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.borderColor = 'var(--accent)'; });
+dropZone.addEventListener('dragleave', () => { dropZone.style.borderColor = 'var(--border)'; });
+dropZone.addEventListener('drop', async e => {
+  e.preventDefault();
+  dropZone.style.borderColor = 'var(--border)';
+  const file = e.dataTransfer.files[0];
+  if (file) await doUpload(file);
+});
+
+async function doUpload(file) {
+  const progress = document.getElementById('upload-progress');
+  const statusEl = document.getElementById('upload-status');
+  const fillEl = document.getElementById('progress-fill');
+  const resultEl = document.getElementById('upload-result');
+
+  progress.style.display = 'block';
+  resultEl.style.display = 'none';
+  statusEl.textContent = 'Uploading and processing...';
+  fillEl.style.width = '30%';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    fillEl.style.width = '70%';
+    const res = await fetch(`${API}/api/upload`, { method: 'POST', body: formData });
+    fillEl.style.width = '100%';
+
+    if (!res.ok) {
+      const err = await res.json();
+      statusEl.textContent = `Error: ${err.detail}`;
+      return;
+    }
+
+    const data = await res.json();
+    statusEl.textContent = 'Upload complete!';
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = `
+      <div class="upload-result-row"><span>✅ New contacts added</span><strong style="color:var(--green)">${data.added}</strong></div>
+      <div class="upload-result-row"><span>🔄 Existing updated</span><strong>${data.updated}</strong></div>
+      <div class="upload-result-row"><span>⏭ Skipped (no URL)</span><strong style="color:var(--muted)">${data.skipped}</strong></div>
+      <div class="upload-result-row"><span>📊 Total processed</span><strong>${data.total_parsed}</strong></div>
+    `;
+    appendMessage('assistant', `✅ Upload complete! Added **${data.added}** new contacts, updated **${data.updated}** existing ones. You now have your full network ready to search.`);
+    loadStats();
+  } catch(e) {
+    statusEl.textContent = 'Upload failed. Please try again.';
+  }
+}
+</script>
+</body>
+</html>
