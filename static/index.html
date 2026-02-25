@@ -189,11 +189,14 @@
 <!-- AUTH SCREEN -->
 <div class="auth-screen active" id="auth-screen">
   <div class="auth-box">
-    <div style="text-align:center;margin-bottom:8px">
-      <img src="/static/logo.png" onerror="this.style.display='none'" style="height:48px;width:auto;margin-bottom:12px" alt="">
+    <div style="text-align:center;margin-bottom:20px">
+      <img src="/static/logo.png" onerror="this.style.display='none'" style="height:56px;width:auto" alt="">
+    </div>
+    <div style="text-align:center;margin-bottom:4px">
+      <span style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:600">Exec Functions</span>
     </div>
     <div class="auth-logo" style="text-align:center">Network<span>Scanner</span></div>
-    <div class="auth-sub" style="text-align:center">B2B Network Intelligence — powered by Claude AI</div>
+    <div class="auth-sub" style="text-align:center">B2B Network Intelligence</div>
 
     <div id="auth-error-banner" style="display:none;background:rgba(248,113,113,.1);border:1px solid var(--red);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--red)"></div>
     <div id="auth-pending-banner" style="display:none;background:rgba(251,191,36,.1);border:1px solid var(--yellow);border-radius:10px;padding:14px;margin-bottom:16px;font-size:13px;color:var(--yellow);line-height:1.5"></div>
@@ -204,7 +207,7 @@
     </a>
 
     <div class="auth-divider">— or —</div>
-    <div class="guest-link">Just exploring? <a onclick="enterGuestMode()">Continue as guest</a><br><span style="font-size:11px">Upload your own CSV — nothing stored on our servers</span></div>
+    <div class="guest-link">Just exploring? <a onclick="enterGuestMode()">Continue as guest</a> — upload your own CSV, nothing stored on our servers.</div>
   </div>
 </div>
 
@@ -473,28 +476,108 @@ function formatMessage(t) {
   return String(t).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\*(.*?)\*/g,'<em>$1</em>').replace(/\n/g,'<br>');
 }
 
-// ── Table ──────────────────────────────────────────────────────────────────
+// ── Table state ────────────────────────────────────────────────────────────
+let tableSort = { col: null, dir: 1 };   // dir: 1=asc, -1=desc
+let tableFilters = { company: '', location: '', industry: '', connected_on: '' };
+let visibleResults = [];   // currentResults after sort+filter, all rows (not capped at 20)
+
+function applyTableView() {
+  // 1. Filter
+  let rows = currentResults.filter(r => {
+    if (tableFilters.company    && !(r.company||'').toLowerCase().includes(tableFilters.company.toLowerCase()))    return false;
+    if (tableFilters.location   && !(r.location||'').toLowerCase().includes(tableFilters.location.toLowerCase()))   return false;
+    if (tableFilters.industry   && !(r.enriched_industry||'').toLowerCase().includes(tableFilters.industry.toLowerCase())) return false;
+    if (tableFilters.connected_on && !(r.connected_on||'').toLowerCase().includes(tableFilters.connected_on.toLowerCase())) return false;
+    return true;
+  });
+  // 2. Sort
+  if (tableSort.col) {
+    rows = [...rows].sort((a, b) => {
+      let av = a[tableSort.col] ?? '';
+      let bv = b[tableSort.col] ?? '';
+      if (tableSort.col === '_score') { av = parseFloat(av)||0; bv = parseFloat(bv)||0; }
+      else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
+      return av < bv ? -tableSort.dir : av > bv ? tableSort.dir : 0;
+    });
+  }
+  visibleResults = rows;
+  return rows;
+}
+
 function renderTable(results, total) {
   document.getElementById('results-title').textContent = 'Search Results';
-  document.getElementById('results-count').textContent = `${total.toLocaleString()} contacts matched`;
-  const preview = document.getElementById('preview-notice');
-  if (total > 20) { preview.style.display='block'; preview.textContent=`Showing first 20 of ${total.toLocaleString()} results. Uncheck rows to exclude before export, then Export CSV for full list.`; }
-  else { preview.style.display='none'; }
+  tableSort = { col: null, dir: 1 };
+  tableFilters = { company: '', location: '', industry: '', connected_on: '' };
   if (results.length === 0) {
+    document.getElementById('preview-notice').style.display='none';
+    document.getElementById('results-count').textContent = `${total.toLocaleString()} contacts matched`;
     document.getElementById('results-body').innerHTML = `<div class="empty-state"><div class="icon">🔍</div><h3>No matches found</h3><p>Try broader keywords or a different search.</p></div>`;
     return;
   }
-  const rows = results.slice(0,20);
+  renderTableBody();
+}
+
+function renderTableBody() {
+  const rows = applyTableView();
+  const total = currentResults.length;
+  const shown = rows.length;
+  const preview = document.getElementById('preview-notice');
+  document.getElementById('results-count').textContent = `${total.toLocaleString()} contacts matched`;
+  if (shown < total) {
+    preview.style.display='block';
+    preview.textContent = `Showing ${shown.toLocaleString()} of ${total.toLocaleString()} results${Object.values(tableFilters).some(Boolean) ? ' (filters applied)' : ''}. Export CSV includes all selected.`;
+  } else {
+    preview.style.display='none';
+  }
+
+  const sortArrow = (col) => {
+    if (tableSort.col !== col) return '<span style="opacity:.3;font-size:10px">⇅</span>';
+    return tableSort.dir === 1 ? '↑' : '↓';
+  };
+  const sortTh = (col, label) =>
+    `<th style="cursor:pointer;user-select:none" onclick="sortTable('${col}')">${label} ${sortArrow(col)}</th>`;
+  const filterInput = (col, placeholder) =>
+    `<input class="col-filter" data-col="${col}" value="${escHtml(tableFilters[col]||'')}" placeholder="${placeholder}" oninput="filterTable('${col}',this.value)" onclick="event.stopPropagation()" style="width:100%;margin-top:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;color:var(--text);font-size:11px;font-family:var(--font)">`;
+
   document.getElementById('results-body').innerHTML = `
     <div class="table-wrapper"><table>
-      <thead><tr>
-        <th class="check-col"><input type="checkbox" class="row-check" id="check-all" checked onchange="toggleAll(this.checked)" title="Select/deselect all"></th>
-        <th>Match</th><th>Name</th><th>Position</th><th>Company</th>
-        <th>Location</th><th>Industry</th><th>Connected</th><th>LinkedIn</th>
-      </tr></thead>
+      <thead>
+        <tr>
+          <th class="check-col"><input type="checkbox" class="row-check" id="check-all" checked onchange="toggleAll(this.checked)" title="Select/deselect all"></th>
+          ${sortTh('_score','Match')}
+          ${sortTh('last_name','Name')}
+          ${sortTh('position','Position')}
+          ${sortTh('company','Company')}
+          ${sortTh('location','Location')}
+          ${sortTh('enriched_industry','Industry')}
+          ${sortTh('connected_on','Connected')}
+          <th>LinkedIn</th>
+        </tr>
+        <tr style="background:var(--surface2)">
+          <th class="check-col"></th>
+          <th></th><th></th><th></th>
+          <th style="padding:4px 14px">${filterInput('company','filter…')}</th>
+          <th style="padding:4px 14px">${filterInput('location','filter…')}</th>
+          <th style="padding:4px 14px">${filterInput('industry','filter…')}</th>
+          <th style="padding:4px 14px">${filterInput('connected_on','e.g. 2023')}</th>
+          <th></th>
+        </tr>
+      </thead>
       <tbody>${rows.map(renderRow).join('')}</tbody>
     </table></div>`;
   updateSelectedCount();
+  updateCheckAll();
+}
+
+function sortTable(col) {
+  if (tableSort.col === col) { tableSort.dir *= -1; }
+  else { tableSort.col = col; tableSort.dir = col === '_score' ? -1 : 1; }
+  renderTableBody();
+}
+
+function filterTable(col, val) {
+  tableFilters[col] = val;
+  renderTableBody();
 }
 
 function renderRow(r) {
@@ -525,19 +608,23 @@ function toggleRow(url, checked) {
   const rowId = 'row-' + url.replace(/[^a-z0-9]/gi,'_');
   const row = document.getElementById(rowId);
   if (row) row.className = checked ? '' : 'deselected';
-  const allCheck = document.getElementById('check-all');
-  if (allCheck) {
-    const shown = currentResults.slice(0,20);
-    const allC = shown.every(r => checkedUrls.has(r.linkedin_url));
-    const anyC = shown.some(r => checkedUrls.has(r.linkedin_url));
-    allCheck.checked = allC;
-    allCheck.indeterminate = !allC && anyC;
-  }
+  updateCheckAll();
   updateSelectedCount();
 }
 
+function updateCheckAll() {
+  const allCheck = document.getElementById('check-all');
+  if (!allCheck) return;
+  const shown = visibleResults.length ? visibleResults : currentResults;
+  const allC = shown.every(r => checkedUrls.has(r.linkedin_url));
+  const anyC = shown.some(r => checkedUrls.has(r.linkedin_url));
+  allCheck.checked = allC;
+  allCheck.indeterminate = !allC && anyC;
+}
+
 function toggleAll(checked) {
-  currentResults.slice(0,20).forEach(r => {
+  const shown = visibleResults.length ? visibleResults : currentResults;
+  shown.forEach(r => {
     if (checked) checkedUrls.add(r.linkedin_url); else checkedUrls.delete(r.linkedin_url);
     const rowId = 'row-' + r.linkedin_url.replace(/[^a-z0-9]/gi,'_');
     const row = document.getElementById(rowId);
@@ -614,6 +701,7 @@ function cancelEnrich() { document.getElementById('confirm-banner').classList.re
 
 // ── Export ─────────────────────────────────────────────────────────────────
 async function exportCSV() {
+  // Export from the full result set (respects checkboxes, ignores column filters — filters only affect view)
   const toExport = currentResults.filter(r => checkedUrls.has(r.linkedin_url));
   if (!toExport.length) { appendMessage('assistant','No contacts selected. Use checkboxes to select rows for export.'); return; }
   const btn=document.getElementById('export-btn');
