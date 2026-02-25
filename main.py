@@ -19,7 +19,7 @@ from ai_engine import (
 )
 from auth import (
     init_auth_db, upsert_google_user, create_session, validate_session,
-    logout_user, get_pending_users, approve_user, revoke_user, get_all_users
+    refresh_session, logout_user, get_pending_users, approve_user, revoke_user, get_all_users
 )
 
 # ---------------------------------------------------------------------------
@@ -52,8 +52,19 @@ if os.path.exists(static_dir):
 
 @app.on_event("startup")
 async def startup():
+    import database as _db
+    import auth as _auth
+    print(f"[startup] DB path (connections): {_db.DB_PATH}")
+    print(f"[startup] DB path (auth):        {_auth.DB_PATH}")
+    print(f"[startup] DB file exists: {os.path.exists(_db.DB_PATH)}")
     init_db()
     init_auth_db()
+    # Log contact count so we can confirm data survived the deploy
+    try:
+        stats = get_stats()
+        print(f"[startup] Contacts in DB: {stats['total']}, enriched: {stats['enriched']}")
+    except Exception as e:
+        print(f"[startup] Could not read stats: {e}")
 
 # ---------------------------------------------------------------------------
 # Session helpers
@@ -61,7 +72,10 @@ async def startup():
 
 def get_session(request: Request) -> dict | None:
     token = request.cookies.get("ns_token") or request.headers.get("X-Session-Token")
-    return validate_session(token)
+    session = validate_session(token)
+    if session and token:
+        refresh_session(token)   # sliding window — active users never time out
+    return session
 
 def require_session(request: Request) -> dict:
     session = get_session(request)
@@ -154,7 +168,7 @@ async def google_callback(request: Request, code: str = "", state: str = "", err
     resp.set_cookie(
         "ns_token", token,
         httponly=True, samesite="lax",
-        max_age=72 * 3600,
+        max_age=720 * 3600,  # 30 days
         secure=APP_BASE_URL.startswith("https")
     )
     resp.delete_cookie("oauth_state")

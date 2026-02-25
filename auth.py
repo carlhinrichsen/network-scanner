@@ -13,7 +13,7 @@ import sqlite3
 DB_PATH = os.environ.get("DB_PATH", "data/connections.db")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").lower().strip()
 APPROVED_DOMAINS = [d.lower().strip() for d in os.environ.get("APPROVED_DOMAINS", "execfunctions.co").split(",") if d.strip()]
-SESSION_TTL_HOURS = 72
+SESSION_TTL_HOURS = 720  # 30 days
 
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -119,6 +119,14 @@ def validate_session(token: str) -> dict | None:
     if datetime.utcnow().isoformat() > session["expires_at"]:
         return None
     return dict(session)
+
+def refresh_session(token: str):
+    """Push the expiry out by SESSION_TTL_HOURS from now (sliding window)."""
+    new_expiry = (datetime.utcnow() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+    conn = get_conn()
+    conn.execute("UPDATE sessions SET expires_at=? WHERE token=?", (new_expiry, token))
+    conn.commit()
+    conn.close()
 
 def logout_user(token: str):
     conn = get_conn()
