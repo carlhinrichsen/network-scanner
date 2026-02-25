@@ -170,6 +170,33 @@
   .status-pending { background: rgba(251,191,36,.15); color: var(--yellow); }
   .status-admin { background: rgba(107,99,255,.2); color: var(--accent2); }
 
+  /* Column filter dropdown */
+  .col-filter-btn { background: none; border: none; cursor: pointer; font-size: 10px; color: var(--muted); padding: 0 2px; vertical-align: middle; transition: color .15s; }
+  .col-filter-btn:hover, .col-filter-btn.active { color: var(--accent2); }
+  .col-filter-btn.active { color: var(--green); }
+  .col-filter-dropdown { display: none; position: fixed; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px; width: 230px; z-index: 200; box-shadow: 0 6px 24px rgba(0,0,0,.5); font-size: 13px; }
+  .col-filter-dropdown.open { display: block; }
+  .col-filter-search { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 12px; font-family: var(--font); margin-bottom: 6px; }
+  .col-filter-search:focus { outline: none; border-color: var(--accent); }
+  .col-filter-mode { display: flex; gap: 4px; margin-bottom: 8px; }
+  .col-filter-mode button { flex: 1; padding: 4px 0; border-radius: 5px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
+  .col-filter-mode button.active { background: var(--accent); border-color: var(--accent); color: white; }
+  .col-filter-list { max-height: 180px; overflow-y: auto; margin-bottom: 8px; }
+  .col-filter-list::-webkit-scrollbar { width: 4px; }
+  .col-filter-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .col-filter-item { display: flex; align-items: center; gap: 8px; padding: 4px 2px; cursor: pointer; border-radius: 4px; }
+  .col-filter-item:hover { background: rgba(255,255,255,.04); }
+  .col-filter-item input[type=checkbox] { accent-color: var(--accent); width: 13px; height: 13px; flex-shrink: 0; }
+  .col-filter-item label { font-size: 12px; color: var(--text); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 175px; }
+  .col-filter-select-all { font-size: 11px; color: var(--accent2); cursor: pointer; margin-bottom: 4px; display: block; }
+  .col-filter-actions { display: flex; gap: 6px; margin-top: 4px; }
+  .col-filter-actions button { flex: 1; padding: 6px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; background: transparent; color: var(--text); }
+  .col-filter-actions button.apply { background: var(--accent); border-color: var(--accent); color: white; font-weight: 600; }
+  /* Date filter */
+  .date-filter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+  .date-filter-grid label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; }
+  .date-filter-grid select { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; color: var(--text); font-size: 12px; font-family: var(--font); }
+
   /* Threshold popover */
   .threshold-wrap { position: relative; display: inline-flex; align-items: center; }
   .threshold-popover { display: none; position: absolute; bottom: calc(100% + 8px); right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; width: 220px; z-index: 50; box-shadow: 0 4px 20px rgba(0,0,0,.4); }
@@ -652,24 +679,65 @@ function skipProposedSearches() {
 }
 
 // ── Table state ────────────────────────────────────────────────────────────
-let tableSort = { col: null, dir: 1 };   // dir: 1=asc, -1=desc
-let tableFilters = { company: '', location: '', industry: '', connected_on: '' };
-let visibleResults = [];   // currentResults after sort+filter, all rows (not capped at 20)
+let tableSort = { col: null, dir: 1 };
+// colFilters: map of col → { mode: 'contains'|'notcontains', values: Set of selected values }
+// For connected_on: { year: '2023'|'', month: '03'|'' }
+let colFilters = {};
+let visibleResults = [];
+let openFilterCol = null;  // which dropdown is open
+
+// ── Filter dropdown engine ─────────────────────────────────────────────────
+const FILTERABLE_COLS = ['last_name','position','company','location','enriched_industry','connected_on'];
+const DATE_COL = 'connected_on';
+
+function getColValues(col) {
+  // Unique non-empty values for a column across full result set
+  const key = col === 'enriched_industry' ? 'enriched_industry' : col;
+  const vals = currentResults.map(r => (r[key]||'').trim()).filter(Boolean);
+  return [...new Set(vals)].sort((a,b) => a.localeCompare(b));
+}
+
+function getDateParts() {
+  const years = new Set(), months = new Set();
+  currentResults.forEach(r => {
+    const d = r.connected_on || '';
+    const m = d.match(/(\d{4})-(\d{2})/);
+    if (m) { years.add(m[1]); months.add(m[2]); }
+  });
+  return { years: [...years].sort().reverse(), months: [...months].sort() };
+}
+
+function isColFiltered(col) {
+  const f = colFilters[col];
+  if (!f) return false;
+  if (col === DATE_COL) return !!(f.year || f.month);
+  return f.values && f.values.size > 0;
+}
 
 function applyTableView() {
-  // 1. Filter
   let rows = currentResults.filter(r => {
-    if (tableFilters.company    && !(r.company||'').toLowerCase().includes(tableFilters.company.toLowerCase()))    return false;
-    if (tableFilters.location   && !(r.location||'').toLowerCase().includes(tableFilters.location.toLowerCase()))   return false;
-    if (tableFilters.industry   && !(r.enriched_industry||'').toLowerCase().includes(tableFilters.industry.toLowerCase())) return false;
-    if (tableFilters.connected_on && !(r.connected_on||'').toLowerCase().includes(tableFilters.connected_on.toLowerCase())) return false;
+    for (const col of FILTERABLE_COLS) {
+      const f = colFilters[col];
+      if (!f) continue;
+      if (col === DATE_COL) {
+        if (!f.year && !f.month) continue;
+        const d = r.connected_on || '';
+        const ym = d.match(/(\d{4})-(\d{2})/);
+        if (f.year && (!ym || ym[1] !== f.year)) return false;
+        if (f.month && (!ym || ym[2] !== f.month)) return false;
+      } else {
+        if (!f.values || f.values.size === 0) continue;
+        const val = (r[col] || '').trim();
+        const matched = f.values.has(val);
+        if (f.mode === 'notcontains' && matched) return false;
+        if (f.mode === 'contains' && !matched) return false;
+      }
+    }
     return true;
   });
-  // 2. Sort
   if (tableSort.col) {
     rows = [...rows].sort((a, b) => {
-      let av = a[tableSort.col] ?? '';
-      let bv = b[tableSort.col] ?? '';
+      let av = a[tableSort.col] ?? '', bv = b[tableSort.col] ?? '';
       if (tableSort.col === '_score') { av = parseFloat(av)||0; bv = parseFloat(bv)||0; }
       else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
       return av < bv ? -tableSort.dir : av > bv ? tableSort.dir : 0;
@@ -682,7 +750,8 @@ function applyTableView() {
 function renderTable(results, total) {
   document.getElementById('results-title').textContent = 'Search Results';
   tableSort = { col: null, dir: 1 };
-  tableFilters = { company: '', location: '', industry: '', connected_on: '' };
+  colFilters = {};
+  closeFilterDropdown();
   if (results.length === 0) {
     document.getElementById('preview-notice').style.display='none';
     document.getElementById('results-count').textContent = `${total.toLocaleString()} contacts matched`;
@@ -696,50 +765,41 @@ function renderTableBody() {
   const rows = applyTableView();
   const total = currentResults.length;
   const shown = rows.length;
+  const hasFilters = FILTERABLE_COLS.some(c => isColFiltered(c));
   const preview = document.getElementById('preview-notice');
   document.getElementById('results-count').textContent = `${total.toLocaleString()} contacts matched`;
-  if (shown < total) {
+  if (shown < total || hasFilters) {
     preview.style.display='block';
-    preview.textContent = `Showing ${shown.toLocaleString()} of ${total.toLocaleString()} results${Object.values(tableFilters).some(Boolean) ? ' (filters applied)' : ''}. Export CSV includes all selected.`;
-  } else {
-    preview.style.display='none';
-  }
+    preview.textContent = `Showing ${shown.toLocaleString()} of ${total.toLocaleString()}${hasFilters ? ' (filters active)' : ''}. Export respects checkboxes.`;
+  } else { preview.style.display='none'; }
 
-  const sortArrow = (col) => {
-    if (tableSort.col !== col) return '<span style="opacity:.3;font-size:10px">⇅</span>';
-    return tableSort.dir === 1 ? '↑' : '↓';
+  const sortArrow = col => tableSort.col !== col
+    ? '<span style="opacity:.25;font-size:9px">⇅</span>'
+    : (tableSort.dir === 1 ? ' ↑' : ' ↓');
+  const filterBtn = (col) => {
+    const active = isColFiltered(col);
+    return `<button class="col-filter-btn ${active?'active':''}" onclick="openFilterDropdown(event,'${col}')" title="Filter">${active?'●':'▾'}</button>`;
   };
-  const sortTh = (col, label) =>
-    `<th style="cursor:pointer;user-select:none" onclick="sortTable('${col}')">${label} ${sortArrow(col)}</th>`;
-  const filterInput = (col, placeholder) =>
-    `<input class="col-filter" data-col="${col}" value="${escHtml(tableFilters[col]||'')}" placeholder="${placeholder}" oninput="filterTable('${col}',this.value)" onclick="event.stopPropagation()" style="width:100%;margin-top:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;color:var(--text);font-size:11px;font-family:var(--font)">`;
+  const sortTh = (col, label, filterable=false) =>
+    `<th style="cursor:pointer;user-select:none;white-space:nowrap" onclick="sortTable('${col}')">${label}${sortArrow(col)}${filterable ? ' '+filterBtn(col) : ''}</th>`;
 
   document.getElementById('results-body').innerHTML = `
     <div class="table-wrapper"><table>
-      <thead>
-        <tr>
-          <th class="check-col"><input type="checkbox" class="row-check" id="check-all" checked onchange="toggleAll(this.checked)" title="Select/deselect all"></th>
-          ${sortTh('_score','Match')}
-          ${sortTh('last_name','Name')}
-          ${sortTh('position','Position')}
-          ${sortTh('company','Company')}
-          ${sortTh('location','Location')}
-          ${sortTh('enriched_industry','Industry')}
-          ${sortTh('connected_on','Connected')}
-          <th>LinkedIn</th>
-        </tr>
-        <tr style="background:var(--surface2)">
-          <th class="check-col"></th>
-          <th></th><th></th><th></th>
-          <th style="padding:4px 14px">${filterInput('company','filter…')}</th>
-          <th style="padding:4px 14px">${filterInput('location','filter…')}</th>
-          <th style="padding:4px 14px">${filterInput('industry','filter…')}</th>
-          <th style="padding:4px 14px">${filterInput('connected_on','e.g. 2023')}</th>
-          <th></th>
-        </tr>
-      </thead>
+      <thead><tr>
+        <th class="check-col"><input type="checkbox" class="row-check" id="check-all" checked onchange="toggleAll(this.checked)"></th>
+        ${sortTh('_score','Match')}
+        ${sortTh('last_name','Name',true)}
+        ${sortTh('position','Position',true)}
+        ${sortTh('company','Company',true)}
+        ${sortTh('location','Location',true)}
+        ${sortTh('enriched_industry','Industry',true)}
+        ${sortTh('connected_on','Connected',true)}
+        <th>LinkedIn</th>
+      </tr></thead>
       <tbody>${rows.map(renderRow).join('')}</tbody>
     </table></div>`;
+
+  // Re-attach the shared dropdown to body (not inside table to avoid clipping)
   updateSelectedCount();
   updateCheckAll();
 }
@@ -750,8 +810,158 @@ function sortTable(col) {
   renderTableBody();
 }
 
-function filterTable(col, val) {
-  tableFilters[col] = val;
+// ── Filter dropdown open/close ─────────────────────────────────────────────
+function openFilterDropdown(e, col) {
+  e.stopPropagation();
+  // If clicking the same open dropdown, close it
+  if (openFilterCol === col) { closeFilterDropdown(); return; }
+  openFilterCol = col;
+
+  // Remove existing dropdown
+  document.getElementById('col-filter-dropdown')?.remove();
+
+  const dropdown = document.createElement('div');
+  dropdown.id = 'col-filter-dropdown';
+  dropdown.className = 'col-filter-dropdown open';
+  dropdown.onclick = e2 => e2.stopPropagation();
+
+  if (col === DATE_COL) {
+    buildDateFilter(dropdown, col);
+  } else {
+    buildTextFilter(dropdown, col);
+  }
+
+  document.body.appendChild(dropdown);
+
+  // Position below the clicked button
+  const rect = e.target.getBoundingClientRect();
+  dropdown.style.top = (rect.bottom + 4) + 'px';
+  // Anchor to right of button, but keep within viewport
+  let left = rect.left;
+  if (left + 230 > window.innerWidth) left = window.innerWidth - 240;
+  dropdown.style.left = left + 'px';
+}
+
+function closeFilterDropdown() {
+  document.getElementById('col-filter-dropdown')?.remove();
+  openFilterCol = null;
+}
+document.addEventListener('click', closeFilterDropdown);
+
+// ── Text filter builder ────────────────────────────────────────────────────
+function buildTextFilter(dropdown, col) {
+  const f = colFilters[col] || { mode: 'contains', values: new Set() };
+  const allVals = getColValues(col);
+  let searchTerm = '';
+
+  function getCheckedVals() {
+    return new Set([...dropdown.querySelectorAll('.cfv:checked')].map(cb => cb.value));
+  }
+
+  function renderList() {
+    const term = searchTerm.toLowerCase();
+    const filtered = allVals.filter(v => v.toLowerCase().includes(term));
+    const listEl = dropdown.querySelector('.col-filter-list');
+    listEl.innerHTML = filtered.length === 0
+      ? `<div style="color:var(--muted);font-size:12px;padding:8px 0">No matches</div>`
+      : filtered.map(v => {
+          const chk = f.values.has(v) ? 'checked' : '';
+          const id = 'cfv_' + Math.random().toString(36).slice(2);
+          return `<div class="col-filter-item"><input type="checkbox" class="cfv" id="${id}" value="${escHtml(v)}" ${chk}><label for="${id}">${escHtml(v)||'(blank)'}</label></div>`;
+        }).join('');
+  }
+
+  dropdown.innerHTML = `
+    <div class="col-filter-mode">
+      <button class="${f.mode==='contains'?'active':''}" onclick="setFilterMode(this,'contains')">Contains</button>
+      <button class="${f.mode==='notcontains'?'active':''}" onclick="setFilterMode(this,'notcontains')">Does not contain</button>
+    </div>
+    <input class="col-filter-search" placeholder="Search values…" oninput="cfSearch(this)">
+    <span class="col-filter-select-all" onclick="cfSelectAll(this)">Select all / None</span>
+    <div class="col-filter-list"></div>
+    <div class="col-filter-actions">
+      <button onclick="clearColFilter('${col}')">Clear</button>
+      <button class="apply" onclick="applyColFilter('${col}')">Apply Filter</button>
+    </div>`;
+
+  renderList();
+
+  dropdown._col = col;
+  dropdown._getMode = () => dropdown.querySelector('.col-filter-mode .active')?.textContent === 'Does not contain' ? 'notcontains' : 'contains';
+  dropdown._getValues = getCheckedVals;
+  dropdown._renderList = renderList;
+  dropdown._allVals = allVals;
+
+  // Restore current filter
+  colFilters[col] = f;
+}
+
+function setFilterMode(btn, mode) {
+  btn.closest('.col-filter-mode').querySelectorAll('button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function cfSearch(input) {
+  const dd = document.getElementById('col-filter-dropdown');
+  if (!dd) return;
+  dd._searchTerm = input.value;
+  // Re-render list with search
+  const term = input.value.toLowerCase();
+  const filtered = dd._allVals.filter(v => v.toLowerCase().includes(term));
+  const f = colFilters[dd._col] || { values: new Set() };
+  dd.querySelector('.col-filter-list').innerHTML = filtered.length === 0
+    ? `<div style="color:var(--muted);font-size:12px;padding:8px 0">No matches</div>`
+    : filtered.map(v => {
+        const chk = f.values.has(v) ? 'checked' : '';
+        const id = 'cfv_' + Math.random().toString(36).slice(2);
+        return `<div class="col-filter-item"><input type="checkbox" class="cfv" id="${id}" value="${escHtml(v)}" ${chk}><label for="${id}">${escHtml(v)||'(blank)'}</label></div>`;
+      }).join('');
+}
+function cfSelectAll(el) {
+  const dd = document.getElementById('col-filter-dropdown');
+  const boxes = dd.querySelectorAll('.cfv');
+  const allChecked = [...boxes].every(b => b.checked);
+  boxes.forEach(b => b.checked = !allChecked);
+}
+function applyColFilter(col) {
+  const dd = document.getElementById('col-filter-dropdown');
+  const values = new Set([...dd.querySelectorAll('.cfv:checked')].map(cb => cb.value));
+  const mode = dd._getMode();
+  colFilters[col] = { mode, values };
+  closeFilterDropdown();
+  renderTableBody();
+}
+function clearColFilter(col) {
+  delete colFilters[col];
+  closeFilterDropdown();
+  renderTableBody();
+}
+
+// ── Date filter builder ────────────────────────────────────────────────────
+function buildDateFilter(dropdown, col) {
+  const f = colFilters[col] || { year: '', month: '' };
+  const { years, months } = getDateParts();
+  const monthNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  const yearOpts = `<option value="">All years</option>` + years.map(y => `<option value="${y}" ${f.year===y?'selected':''}>${y}</option>`).join('');
+  const monthOpts = `<option value="">All months</option>` + months.map(m => `<option value="${m}" ${f.month===m?'selected':''}>${monthNames[parseInt(m)]||m}</option>`).join('');
+
+  dropdown.innerHTML = `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Filter by date connected</div>
+    <div class="date-filter-grid">
+      <div><label>Year</label><select id="df-year">${yearOpts}</select></div>
+      <div><label>Month</label><select id="df-month">${monthOpts}</select></div>
+    </div>
+    <div class="col-filter-actions">
+      <button onclick="clearColFilter('${col}')">Clear</button>
+      <button class="apply" onclick="applyDateFilter('${col}')">Apply Filter</button>
+    </div>`;
+}
+function applyDateFilter(col) {
+  const year = document.getElementById('df-year')?.value || '';
+  const month = document.getElementById('df-month')?.value || '';
+  if (!year && !month) { delete colFilters[col]; }
+  else { colFilters[col] = { year, month }; }
+  closeFilterDropdown();
   renderTableBody();
 }
 
