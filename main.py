@@ -192,25 +192,21 @@ async def enrich(req: EnrichRequest):
 # Export endpoint
 # ---------------------------------------------------------------------------
 
-@app.get("/api/export")
-async def export_csv(query: Optional[str] = None):
-    connections = get_all_connections()
+class ExportRequest(BaseModel):
+    results: list  # full result list from the frontend
 
-    if query:
-        try:
-            filters = extract_filters(query, [])
-            connections = filter_connections(connections, filters)
-        except:
-            pass
-
+@app.post("/api/export")
+async def export_csv(req: ExportRequest):
+    """Export exactly the results the frontend is holding — no re-filtering."""
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=[
+    fieldnames = [
         "first_name", "last_name", "company", "position",
         "linkedin_url", "email", "connected_on",
         "enriched_industry", "enriched_company_desc", "_score"
-    ], extrasaction="ignore")
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
-    writer.writerows(connections)
+    writer.writerows(req.results)
 
     output.seek(0)
     return StreamingResponse(
