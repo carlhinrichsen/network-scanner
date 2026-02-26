@@ -119,6 +119,8 @@
   .enriched-pill { font-size: 10px; background: rgba(107,99,255,.2); color: var(--accent2); padding: 1px 6px; border-radius: 10px; margin-left: 4px; }
   .clear-history-btn { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: color .15s; white-space: nowrap; }
   .clear-history-btn:hover { color: var(--red); }
+  @keyframes enrich-pulse { 0%,100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px rgba(107,99,255,0.5); border-color: var(--accent2); color: var(--accent2); } }
+  .enrich-flash { animation: enrich-pulse 0.6s ease 3; }
   .undo-redo-btns { display: flex; gap: 2px; align-items: center; }
   .undo-redo-btns button { background: none; border: 1px solid var(--border); color: var(--muted); font-size: 14px; cursor: pointer; padding: 3px 8px; border-radius: 6px; transition: color .15s, border-color .15s, opacity .15s; line-height: 1; }
   .undo-redo-btns button:hover:not(:disabled) { color: var(--text); border-color: var(--accent2); }
@@ -569,6 +571,12 @@ function syncUndoRedoBtns() {
   if (u) u.disabled = resultHistory.length === 0;
   if (r) r.disabled = resultFuture.length === 0;
 }
+function flashEnrichBtn() {
+  const btn = document.getElementById('enrich-btn');
+  if (!btn || btn.disabled) return;
+  btn.classList.add('enrich-flash');
+  setTimeout(() => btn.classList.remove('enrich-flash'), 1800);
+}
 
 // ── Chat ───────────────────────────────────────────────────────────────────
 function handleKey(e) { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
@@ -635,6 +643,10 @@ async function sendMessage() {
       syncUndoRedoBtns();
       // Auto-enrich only on fresh searches (narrow/expand already have the relevant contacts)
       if (!isGuest && searchMode === 'new') autoEnrichResults(currentResults);
+
+    } else if (data.type === 'location_blocked') {
+      // Results stay exactly as-is — just show the message and pulse the Enrich button
+      flashEnrichBtn();
 
     } else if (data.type === 'icp_comparison') {
       renderICPComparison(data.icp_results);
