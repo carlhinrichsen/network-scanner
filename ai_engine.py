@@ -75,7 +75,9 @@ Return JSON with this exact schema:
   "industries": ["list of industries if mentioned"],
   "description_keywords": ["b2b", "saas", "series a", "marketplace"],
   "connected_after_year": null,
+  "connected_after_month": null,
   "connected_before_year": null,
+  "connected_before_month": null,
   "exclude_keywords": ["words that should NOT appear in any field"],
   "confidence_threshold": 0.6
 }
@@ -90,9 +92,12 @@ Field guidance:
 - location_keywords: city, country, or region fragments (e.g. "london", "uk", "germany", "nordics"). Set requires_location: true when the query is primarily location-based.
 - requires_location: true ONLY if location is the primary filter (e.g. "who do I know in Paris"). False for queries that mention location incidentally.
 - description_keywords: free-text concepts to find in enriched company descriptions (e.g. "b2b saas", "fintech", "series a", "marketplace", "enterprise"). Use when user asks about company type or stage.
-- connected_after_year: integer year (e.g. 2023) — include only contacts connected on or after January 1st of this year. Use when user says "in 2025", "since 2024", "this year", "last year", etc. Set to null if no year constraint.
-- connected_before_year: integer year — include only contacts connected before January 1st of this year. Set to null if no constraint.
+- connected_after_year: integer year (e.g. 2023) — include only contacts connected on or after this year (and month if specified). Use when user says "in 2025", "since 2024", "this year", "last year", etc. Set to null if no year constraint.
+- connected_after_month: integer 1-12 — optional month companion to connected_after_year. Set only when month precision is implied (e.g. "since April 2024" → after_year: 2024, after_month: 4). Leave null for year-only constraints.
+- connected_before_year: integer year — include only contacts connected before this year (and month if specified). Set to null if no constraint.
+- connected_before_month: integer 1-12 — optional month companion to connected_before_year. E.g. "before March 2023" → before_year: 2023, before_month: 3.
 - For "in 2025" → set connected_after_year: 2025 AND connected_before_year: 2026.
+- For relative dates (today is {TODAY}): "last 6 months" → compute cutoff month/year from today. "this year" → after_year: {CURRENT_YEAR}. "last year" → after_year: {LAST_YEAR}, before_year: {CURRENT_YEAR}. "Q1 2024" → after_year: 2024, after_month: 1, before_year: 2024, before_month: 4. "recent" or "lately" → last 3 months from today.
 - For position_concepts, think broadly. E.g. "head of sales" should match: VP Sales, Chief Revenue Officer, Director of Sales, Head of Revenue, Sales Director, Commercial Director etc.
 - For seniority_levels, only include if the user specifies seniority.
 - All arrays can be empty [].
@@ -100,13 +105,22 @@ Return ONLY the JSON object, no markdown, no explanation."""
 
 
 def extract_filters(user_message: str, conversation_history: list) -> dict:
+    import datetime as _dt
     client = get_claude()
     messages = conversation_history[-6:] + [{"role": "user", "content": user_message}]
+
+    today = _dt.date.today()
+    dynamic_system = (
+        FILTER_SYSTEM
+        .replace('{TODAY}', today.strftime('%Y-%m-%d'))
+        .replace('{CURRENT_YEAR}', str(today.year))
+        .replace('{LAST_YEAR}', str(today.year - 1))
+    )
 
     resp = client.messages.create(
         model=HAIKU_MODEL,
         max_tokens=1024,
-        system=FILTER_SYSTEM,
+        system=dynamic_system,
         messages=messages
     )
     result = _parse_json_response(resp.content[0].text)
@@ -204,19 +218,29 @@ def score_connection(conn: dict, filters: dict) -> float:
 
     # Connection date filter — hard gate (not a soft score)
     # LinkedIn connected_on format: "DD MMM YYYY" e.g. "15 Jan 2023"
-    after_year  = filters.get("connected_after_year")
-    before_year = filters.get("connected_before_year")
+    after_year   = filters.get("connected_after_year")
+    after_month  = filters.get("connected_after_month")
+    before_year  = filters.get("connected_before_year")
+    before_month = filters.get("connected_before_month")
     if after_year is not None or before_year is not None:
         raw_date = conn.get("connected_on") or ""
         import re as _re
-        dm = _re.match(r'(\d{1,2})\s+[A-Za-z]{3}\s+(\d{4})', raw_date)
-        conn_year = int(dm.group(2)) if dm else None
-        if conn_year is None:
+        dm = _re.match(r'(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})', raw_date)
+        if not dm:
             return 0.0  # date unparseable — exclude
-        if after_year  is not None and conn_year < int(after_year):
-            return 0.0
-        if before_year is not None and conn_year >= int(before_year):
-            return 0.0
+        MO = {'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,
+              'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12}
+        conn_year  = int(dm.group(3))
+        conn_month = MO.get(dm.group(2), 0)
+        conn_ym = conn_year * 100 + conn_month  # YYYYMM comparable integer
+        if after_year is not None:
+            after_ym = int(after_year) * 100 + (int(after_month) if after_month else 1)
+            if conn_ym < after_ym:
+                return 0.0
+        if before_year is not None:
+            before_ym = int(before_year) * 100 + (int(before_month) if before_month else 1)
+            if conn_ym >= before_ym:
+                return 0.0
 
     # Exclusion penalty — covers position, company, location, and name
     for excl in filters.get("exclude_keywords", []):

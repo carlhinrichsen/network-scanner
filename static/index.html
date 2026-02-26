@@ -664,8 +664,8 @@ async function sendMessage() {
       document.getElementById('export-btn').disabled = currentResults.length === 0;
       document.getElementById('enrich-btn').disabled = isGuest || currentResults.length === 0;
       syncUndoRedoBtns();
-      // Auto-enrich only on fresh searches (narrow/expand already have the relevant contacts)
-      if (!isGuest && searchMode === 'new') autoEnrichResults(currentResults);
+      // Auto-enrich whenever result set is small enough (threshold check is inside the function)
+      if (!isGuest) autoEnrichResults(currentResults);
 
     } else if (data.type === 'location_blocked') {
       // Results stay exactly as-is — just show the message and pulse the Enrich button
