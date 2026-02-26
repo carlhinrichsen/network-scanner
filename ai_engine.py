@@ -56,7 +56,7 @@ The database has these fields:
 - first_name, last_name (the contact's name)
 - company (column E in LinkedIn export)
 - position (column F in LinkedIn export)
-- connected_on
+- connected_on (date connected on LinkedIn, format "DD MMM YYYY" e.g. "15 Jan 2023")
 - location (city/country — populated only after enrichment)
 - enriched_industry (may be empty — populated after enrichment)
 - enriched_company_desc (may be empty — free-text company description, populated after enrichment)
@@ -64,6 +64,7 @@ The database has these fields:
 Return JSON with this exact schema:
 {
   "intent_summary": "1-2 sentence plain English summary of what the user is looking for",
+  "search_mode": "new",
   "name_keywords": ["andrea", "smith"],
   "location_keywords": ["london", "uk", "berlin"],
   "requires_location": false,
@@ -73,15 +74,25 @@ Return JSON with this exact schema:
   "seniority_levels": ["C-suite", "VP", "Director", "Manager", "Individual Contributor", "Founder"],
   "industries": ["list of industries if mentioned"],
   "description_keywords": ["b2b", "saas", "series a", "marketplace"],
+  "connected_after_year": null,
+  "connected_before_year": null,
   "exclude_keywords": ["words that should NOT appear in any field"],
   "confidence_threshold": 0.6
 }
 
 Field guidance:
+- search_mode: CRITICAL — one of exactly "new", "narrow", or "expand":
+  * "new" — the user wants a fresh search, unrelated to what's currently shown (e.g. "find me all founders", "show me people at Google", "search for VPs")
+  * "narrow" — the user wants to filter DOWN the current results to a smaller subset (e.g. "now only the ones in SaaS", "just show me the UK ones", "remove anyone in sales", "filter to C-suite only"). Clue: words like "now only", "just the", "filter to", "narrow", "of those", "from those"
+  * "expand" — the user wants to ADD more contacts to the existing list without losing current results (e.g. "also include marketing people", "add anyone from Stripe", "plus fintech contacts"). Clue: words like "also", "add", "plus", "include", "as well as", "and also"
+  Use conversation history to understand whether there is an active result set being refined.
 - name_keywords: use when user asks for contacts by first or last name (e.g. "all Andreas", "people called Smith"). Match fragments case-insensitively.
 - location_keywords: city, country, or region fragments (e.g. "london", "uk", "germany", "nordics"). Set requires_location: true when the query is primarily location-based.
 - requires_location: true ONLY if location is the primary filter (e.g. "who do I know in Paris"). False for queries that mention location incidentally.
 - description_keywords: free-text concepts to find in enriched company descriptions (e.g. "b2b saas", "fintech", "series a", "marketplace", "enterprise"). Use when user asks about company type or stage.
+- connected_after_year: integer year (e.g. 2023) — include only contacts connected on or after January 1st of this year. Use when user says "in 2025", "since 2024", "this year", "last year", etc. Set to null if no year constraint.
+- connected_before_year: integer year — include only contacts connected before January 1st of this year. Set to null if no constraint.
+- For "in 2025" → set connected_after_year: 2025 AND connected_before_year: 2026.
 - For position_concepts, think broadly. E.g. "head of sales" should match: VP Sales, Chief Revenue Officer, Director of Sales, Head of Revenue, Sales Director, Commercial Director etc.
 - For seniority_levels, only include if the user specifies seniority.
 - All arrays can be empty [].
@@ -190,6 +201,22 @@ def score_connection(conn: dict, filters: dict) -> float:
         weights += 1.0
         if any(kw.lower() in desc for kw in dk):
             score += 1.0
+
+    # Connection date filter — hard gate (not a soft score)
+    # LinkedIn connected_on format: "DD MMM YYYY" e.g. "15 Jan 2023"
+    after_year  = filters.get("connected_after_year")
+    before_year = filters.get("connected_before_year")
+    if after_year is not None or before_year is not None:
+        raw_date = conn.get("connected_on") or ""
+        import re as _re
+        dm = _re.match(r'(\d{1,2})\s+[A-Za-z]{3}\s+(\d{4})', raw_date)
+        conn_year = int(dm.group(2)) if dm else None
+        if conn_year is None:
+            return 0.0  # date unparseable — exclude
+        if after_year  is not None and conn_year < int(after_year):
+            return 0.0
+        if before_year is not None and conn_year >= int(before_year):
+            return 0.0
 
     # Exclusion penalty — covers position, company, location, and name
     for excl in filters.get("exclude_keywords", []):
@@ -341,9 +368,11 @@ Keep your response under 200 words."""
 def synthesise_response(user_message: str, filters: dict, results: list, conversation_history: list) -> str:
     client = get_claude()
 
+    search_mode = filters.get('search_mode', 'new')
     context = f"""User asked: {user_message}
 
 Search intent: {filters.get('intent_summary', '')}
+Search mode: {search_mode} (new=fresh list, narrow=filtered subset of prior results, expand=added to prior results)
 
 Results: {len(results)} contacts matched.
 

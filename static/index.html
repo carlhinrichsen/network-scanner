@@ -119,6 +119,10 @@
   .enriched-pill { font-size: 10px; background: rgba(107,99,255,.2); color: var(--accent2); padding: 1px 6px; border-radius: 10px; margin-left: 4px; }
   .clear-history-btn { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: color .15s; white-space: nowrap; }
   .clear-history-btn:hover { color: var(--red); }
+  .undo-redo-btns { display: flex; gap: 2px; align-items: center; }
+  .undo-redo-btns button { background: none; border: 1px solid var(--border); color: var(--muted); font-size: 14px; cursor: pointer; padding: 2px 7px; border-radius: 6px; transition: color .15s, border-color .15s; line-height: 1; }
+  .undo-redo-btns button:hover:not(:disabled) { color: var(--text); border-color: var(--accent2); }
+  .undo-redo-btns button:disabled { opacity: 0.3; cursor: default; }
   .enriching-spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--border); border-top-color: var(--accent2); border-radius: 50%; animation: spin .7s linear infinite; margin-left: 4px; vertical-align: middle; }
   tr.enriching-row { opacity: 0.65; }
   tr.enriching-row td { background: rgba(108,99,255,0.04); }
@@ -345,9 +349,15 @@
 
   <div class="results-panel">
     <div class="results-header">
-      <div>
-        <div class="results-title" id="results-title">Results</div>
-        <div class="results-count" id="results-count">Run a search to see contacts</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div>
+          <div class="results-title" id="results-title">Results</div>
+          <div class="results-count" id="results-count">Run a search to see contacts</div>
+        </div>
+        <div class="undo-redo-btns">
+          <button id="undo-btn" onclick="undoResults()" disabled title="Undo last result change (↩)">↩</button>
+          <button id="redo-btn" onclick="redoResults()" disabled title="Redo (↪)">↪</button>
+        </div>
       </div>
       <div class="results-actions">
         <span class="selected-count" id="selected-count"></span>
@@ -408,6 +418,9 @@ let enrichingUrls = new Set();  // tracks which rows are currently being enriche
 let pendingProposedSearches = [];
 let pendingProposedDbSearch = null;
 let pendingProposedMessage = '';  // the original message to re-send with proposals
+let resultHistory = [];  // undo stack: [{results, filters}, ...]
+let resultFuture  = [];  // redo stack: [{results, filters}, ...]
+const RESULT_HISTORY_LIMIT = 10;
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 function handleOAuthRedirectParams() {
@@ -513,13 +526,49 @@ function clearHistory() {
   conversationHistory = [];
   document.getElementById('chat-messages').innerHTML = '';
   currentResults = []; colFilters = {}; enrichingUrls = new Set(); checkedUrls = new Set();
+  resultHistory = []; resultFuture = [];
   closeFilterDropdown();
   document.getElementById('results-title').textContent = 'Results';
   document.getElementById('results-count').textContent = 'Run a search to see contacts';
   document.getElementById('table-body').innerHTML = '';
   document.getElementById('export-btn').disabled = true;
   document.getElementById('enrich-btn').disabled = true;
+  syncUndoRedoBtns();
   appendMessage('assistant', '↺ Conversation cleared — starting fresh.');
+}
+
+// ── Undo / Redo result sets ─────────────────────────────────────────────────
+function pushUndoStack() {
+  if (resultHistory.length >= RESULT_HISTORY_LIMIT) resultHistory.shift(); // drop oldest
+  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters });
+  resultFuture = [];
+  syncUndoRedoBtns();
+}
+function undoResults() {
+  if (!resultHistory.length) return;
+  resultFuture.push({ results: currentResults.map(r => ({...r})), filters: currentFilters });
+  const prev = resultHistory.pop();
+  currentResults = prev.results;
+  currentFilters = prev.filters;
+  checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+  renderTable(currentResults, currentResults.length);
+  syncUndoRedoBtns();
+}
+function redoResults() {
+  if (!resultFuture.length) return;
+  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters });
+  const next = resultFuture.pop();
+  currentResults = next.results;
+  currentFilters = next.filters;
+  checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+  renderTable(currentResults, currentResults.length);
+  syncUndoRedoBtns();
+}
+function syncUndoRedoBtns() {
+  const u = document.getElementById('undo-btn');
+  const r = document.getElementById('redo-btn');
+  if (u) u.disabled = resultHistory.length === 0;
+  if (r) r.disabled = resultFuture.length === 0;
 }
 
 // ── Chat ───────────────────────────────────────────────────────────────────
@@ -551,15 +600,42 @@ async function sendMessage() {
     typingEl.querySelector('.msg-meta').textContent = new Date().toLocaleTimeString();
 
     if (data.type === 'search') {
-      currentResults = data.results || [];
+      const searchMode = data.filters?.search_mode || 'new';
+      const incoming = data.results || [];
+
+      // Save current state to undo stack before mutating
+      if (currentResults.length > 0) pushUndoStack();
+
+      if (searchMode === 'narrow' && currentResults.length > 0) {
+        // Intersection: keep only contacts in both the current list and the new results
+        const incomingUrls = new Set(incoming.map(r => r.linkedin_url));
+        const scoreMap = Object.fromEntries(incoming.map(r => [r.linkedin_url, r._score]));
+        // Note: currentResults was already snapshotted in pushUndoStack above, so we read it fresh
+        const prevResults = resultHistory[resultHistory.length - 1]?.results || [];
+        currentResults = prevResults
+          .filter(r => incomingUrls.has(r.linkedin_url))
+          .map(r => ({...r, _score: scoreMap[r.linkedin_url] ?? r._score}));
+      } else if (searchMode === 'expand' && currentResults.length > 0) {
+        // Union: add new contacts not already in current list, then re-sort by score
+        const prevResults = resultHistory[resultHistory.length - 1]?.results || [];
+        const existingUrls = new Set(prevResults.map(r => r.linkedin_url));
+        const newOnes = incoming.filter(r => !existingUrls.has(r.linkedin_url));
+        currentResults = [...prevResults, ...newOnes]
+          .sort((a, b) => (b._score || 0) - (a._score || 0));
+      } else {
+        // 'new' (or fallback) — full replace
+        currentResults = incoming;
+      }
+
       currentFilters = data.filters;
       checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
-      enrichingUrls = new Set();  // reset any prior enrichment state
-      renderTable(currentResults, data.total);
+      enrichingUrls = new Set();
+      renderTable(currentResults, currentResults.length);
       document.getElementById('export-btn').disabled = currentResults.length === 0;
       document.getElementById('enrich-btn').disabled = isGuest || currentResults.length === 0;
-      // Kick off auto-enrich silently in the background
-      if (!isGuest) autoEnrichResults(currentResults);
+      syncUndoRedoBtns();
+      // Auto-enrich only on fresh searches (narrow/expand already have the relevant contacts)
+      if (!isGuest && searchMode === 'new') autoEnrichResults(currentResults);
 
     } else if (data.type === 'icp_comparison') {
       renderICPComparison(data.icp_results);
@@ -1297,11 +1373,13 @@ async function autoEnrichResults(results) {
 
 function requestEnrich() {
   if (!currentResults.length || isGuest) return;
-  const unenriched = currentResults.filter(r => !r.enriched_at && !enrichingUrls.has(r.linkedin_url));
-  if (!unenriched.length) { appendMessage('assistant','All contacts already enriched! 🎉'); return; }
+  const checked = currentResults.filter(r => checkedUrls.has(r.linkedin_url));
+  if (!checked.length) { appendMessage('assistant', 'No contacts selected — tick the checkboxes for the contacts you want to enrich.'); return; }
+  const unenriched = checked.filter(r => !r.enriched_at && !enrichingUrls.has(r.linkedin_url));
+  if (!unenriched.length) { appendMessage('assistant','All selected contacts are already enriched! 🎉'); return; }
   const cos=[...new Set(unenriched.map(r=>r.company).filter(Boolean))];
   pendingEnrichUrls = unenriched.map(r=>r.linkedin_url);
-  document.getElementById('confirm-text').textContent=`This will look up ${unenriched.length} contacts across ${cos.length} companies online via Tavily. Proceed?`;
+  document.getElementById('confirm-text').textContent=`This will look up ${unenriched.length} selected contacts across ${cos.length} companies online via Tavily. Proceed?`;
   document.getElementById('confirm-banner').classList.add('active');
 }
 async function confirmEnrich() {
