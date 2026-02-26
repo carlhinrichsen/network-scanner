@@ -117,6 +117,8 @@
   .linkedin-link { color: var(--accent2); text-decoration: none; font-size: 12px; }
   .linkedin-link:hover { text-decoration: underline; }
   .enriched-pill { font-size: 10px; background: rgba(107,99,255,.2); color: var(--accent2); padding: 1px 6px; border-radius: 10px; margin-left: 4px; }
+  .clear-history-btn { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: color .15s; white-space: nowrap; }
+  .clear-history-btn:hover { color: var(--red); }
   .enriching-spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--border); border-top-color: var(--accent2); border-radius: 50%; animation: spin .7s linear infinite; margin-left: 4px; vertical-align: middle; }
   tr.enriching-row { opacity: 0.65; }
   tr.enriching-row td { background: rgba(108,99,255,0.04); }
@@ -320,10 +322,13 @@
       </div>
     </div>
     <div class="chat-input-area">
-      <div class="mode-tabs">
-        <button class="mode-tab active" data-mode="search" onclick="setMode('search')">🔍 Search</button>
-        <button class="mode-tab" data-mode="icp" onclick="setMode('icp')">🎯 ICP</button>
-        <button class="mode-tab" data-mode="discovery" onclick="setMode('discovery')">🔭 Discovery</button>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <div class="mode-tabs">
+          <button class="mode-tab active" data-mode="search" onclick="setMode('search')">🔍 Search</button>
+          <button class="mode-tab" data-mode="icp" onclick="setMode('icp')">🎯 ICP</button>
+          <button class="mode-tab" data-mode="discovery" onclick="setMode('discovery')">🔭 Discovery</button>
+        </div>
+        <button class="clear-history-btn" onclick="clearHistory()" title="Clear conversation — AI starts fresh with no prior context">↺ New conversation</button>
       </div>
       <div class="input-row">
         <textarea class="chat-input" id="chat-input" rows="2" placeholder='e.g. "Find heads of sales at SaaS companies"' onkeydown="handleKey(event)"></textarea>
@@ -496,6 +501,19 @@ function setMode(mode) {
     discovery: 'Ask anything — I\'ll search your network, the web, and think out loud with you...'
   };
   document.getElementById('chat-input').placeholder = ph[mode];
+}
+
+function clearHistory() {
+  conversationHistory = [];
+  document.getElementById('chat-messages').innerHTML = '';
+  currentResults = []; colFilters = {}; enrichingUrls = new Set(); checkedUrls = new Set();
+  closeFilterDropdown();
+  document.getElementById('results-title').textContent = 'Results';
+  document.getElementById('results-count').textContent = 'Run a search to see contacts';
+  document.getElementById('table-body').innerHTML = '';
+  document.getElementById('export-btn').disabled = true;
+  document.getElementById('enrich-btn').disabled = true;
+  appendMessage('assistant', '↺ Conversation cleared — starting fresh.');
 }
 
 // ── Chat ───────────────────────────────────────────────────────────────────
@@ -721,11 +739,17 @@ function getColValues(col) {
 }
 
 function getDateParts() {
+  // LinkedIn exports connected_on as "DD MMM YYYY" (e.g. "15 Jan 2023")
+  const monthMap = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
   const years = new Set(), months = new Set();
   currentResults.forEach(r => {
     const d = r.connected_on || '';
-    const m = d.match(/(\d{4})-(\d{2})/);
-    if (m) { years.add(m[1]); months.add(m[2]); }
+    const m = d.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
+    if (m) {
+      years.add(m[3]);  // "2023"
+      const mo = monthMap[m[2]];
+      if (mo) months.add(String(mo).padStart(2, '0'));  // "01".."12"
+    }
   });
   return { years: [...years].sort().reverse(), months: [...months].sort() };
 }
@@ -745,9 +769,11 @@ function applyTableView() {
       if (col === DATE_COL) {
         if (!f.year && !f.month) continue;
         const d = r.connected_on || '';
-        const ym = d.match(/(\d{4})-(\d{2})/);
-        if (f.year && (!ym || ym[1] !== f.year)) return false;
-        if (f.month && (!ym || ym[2] !== f.month)) return false;
+        // LinkedIn format: "15 Jan 2023" — year is a plain substring, month needs name lookup
+        const moNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const yrMatch = !f.year || d.includes(f.year);
+        const moMatch = !f.month || d.includes(moNames[parseInt(f.month)] || '');
+        if (!yrMatch || !moMatch) return false;
       } else {
         if (!f.values || f.values.size === 0) continue;
         const val = (r[col] || '').trim();
@@ -760,9 +786,18 @@ function applyTableView() {
   });
   if (tableSort.col) {
     rows = [...rows].sort((a, b) => {
-      let av = a[tableSort.col] ?? '', bv = b[tableSort.col] ?? '';
-      if (tableSort.col === '_score') { av = parseFloat(av)||0; bv = parseFloat(bv)||0; }
-      else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
+      if (tableSort.col === '_score') {
+        const av = parseFloat(a._score)||0, bv = parseFloat(b._score)||0;
+        return (av - bv) * tableSort.dir;
+      }
+      if (tableSort.col === 'connected_on') {
+        // Parse LinkedIn "DD MMM YYYY" into a real Date for correct year→month→day ordering
+        const mo = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+        const parse = s => { const m = (s||'').match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/); return m ? new Date(+m[3], mo[m[2]]??0, +m[1]) : new Date(0); };
+        return (parse(a.connected_on) - parse(b.connected_on)) * tableSort.dir;
+      }
+      const av = String(a[tableSort.col] ?? '').toLowerCase();
+      const bv = String(b[tableSort.col] ?? '').toLowerCase();
       return av < bv ? -tableSort.dir : av > bv ? tableSort.dir : 0;
     });
   }
@@ -993,13 +1028,16 @@ function renderRow(r) {
   const sc = score >= .8 ? 'score-high' : score >= .6 ? 'score-mid' : 'score-low';
   const name = [r.first_name, r.last_name].filter(Boolean).join(' ');
   const isEnriching = enrichingUrls.has(r.linkedin_url);
-  const enrichedBadge = r.enriched_at
-    ? '<span class="enriched-pill">✓</span>'
+  // Location: show spinner while enriching (location is enriched data)
+  const locText = r.location ? escHtml(r.location) : '–';
+  const locSpinner = isEnriching ? ' <span class="enriching-spinner" title="Enriching…"></span>' : '';
+  const loc = locText + locSpinner;
+  // Industry: show "enriching…" while in progress, value + ✓ pill when done
+  const industryDisplay = r.enriched_at
+    ? escHtml(r.enriched_industry||'–') + ' <span class="enriched-pill">✓</span>'
     : isEnriching
-      ? '<span class="enriching-spinner" title="Enriching…"></span>'
-      : '';
-  const loc = r.location ? escHtml(r.location) : '–';
-  const industryText = isEnriching && !r.enriched_industry ? '<span style="color:var(--muted);font-style:italic;font-size:11px">enriching…</span>' : escHtml(r.enriched_industry||'–');
+      ? '<span style="color:var(--muted);font-style:italic;font-size:11px">enriching…</span>'
+      : escHtml(r.enriched_industry||'–');
   const checked = checkedUrls.has(r.linkedin_url);
   const rowId = 'row-' + r.linkedin_url.replace(/[^a-z0-9]/gi,'_');
   const escapedUrl = escHtml(r.linkedin_url);
@@ -1009,10 +1047,10 @@ function renderRow(r) {
       <td class="check-col"><input type="checkbox" class="row-check" ${checked ? 'checked' : ''} onchange="toggleRow('${escapedUrl}',this.checked)"></td>
       <td><span class="score-badge ${sc}">${Math.round(score*100)}%</span></td>
       <td style="white-space:nowrap;font-weight:500">${escHtml(name)}</td>
-      <td style="max-width:180px">${escHtml(r.position||'–')}${enrichedBadge}</td>
+      <td style="max-width:180px">${escHtml(r.position||'–')}</td>
       <td style="white-space:nowrap">${escHtml(r.company||'–')}</td>
       <td style="color:var(--muted);font-size:12px;white-space:nowrap">${loc}</td>
-      <td style="color:var(--muted);font-size:12px">${industryText}</td>
+      <td style="color:var(--muted);font-size:12px">${industryDisplay}</td>
       <td style="color:var(--muted);font-size:12px;white-space:nowrap">${r.connected_on||'–'}</td>
       <td><a class="linkedin-link" href="${escapedUrl}" target="_blank">↗</a></td>
     </tr>`;
