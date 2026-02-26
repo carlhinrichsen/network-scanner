@@ -1,6 +1,7 @@
 import sqlite3
 import os
 from datetime import datetime
+from typing import List
 
 DB_PATH = os.environ.get("DB_PATH", "data/connections.db")
 
@@ -54,7 +55,7 @@ def init_db():
         conn.close()
 
 
-def upsert_connections(rows: list[dict]) -> dict:
+def upsert_connections(rows: List[dict]) -> dict:
     conn = get_conn()
     try:
         c = conn.cursor()
@@ -102,7 +103,7 @@ def upsert_connections(rows: list[dict]) -> dict:
         conn.close()
 
 
-def get_all_connections() -> list[dict]:
+def get_all_connections() -> List[dict]:
     conn = get_conn()
     try:
         rows = conn.execute(

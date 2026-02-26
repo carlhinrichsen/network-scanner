@@ -3,7 +3,7 @@ import io
 import csv
 import json
 import secrets
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -75,7 +75,7 @@ async def startup():
 # Session helpers
 # ---------------------------------------------------------------------------
 
-def get_session(request: Request) -> dict | None:
+def get_session(request: Request):
     token = request.cookies.get("ns_token") or request.headers.get("X-Session-Token")
     session = validate_session(token)
     if session and token:
@@ -240,7 +240,7 @@ class ChatMessage(BaseModel):
     icp_descriptions: str = ""              # ICP: re-passed when confirming enrichment
 
 class EnrichRequest(BaseModel):
-    linkedin_urls: list[str]
+    linkedin_urls: List[str]
 
 class ExportRequest(BaseModel):
     results: list

@@ -121,7 +121,7 @@ def create_session(user: dict) -> str:
     return token
 
 
-def validate_session(token: str) -> dict | None:
+def validate_session(token: str):
     """Return session info if valid, None if expired/invalid."""
     if not token:
         return None
