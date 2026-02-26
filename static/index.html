@@ -120,9 +120,9 @@
   .clear-history-btn { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: color .15s; white-space: nowrap; }
   .clear-history-btn:hover { color: var(--red); }
   .undo-redo-btns { display: flex; gap: 2px; align-items: center; }
-  .undo-redo-btns button { background: none; border: 1px solid var(--border); color: var(--muted); font-size: 14px; cursor: pointer; padding: 2px 7px; border-radius: 6px; transition: color .15s, border-color .15s; line-height: 1; }
+  .undo-redo-btns button { background: none; border: 1px solid var(--border); color: var(--muted); font-size: 14px; cursor: pointer; padding: 3px 8px; border-radius: 6px; transition: color .15s, border-color .15s, opacity .15s; line-height: 1; }
   .undo-redo-btns button:hover:not(:disabled) { color: var(--text); border-color: var(--accent2); }
-  .undo-redo-btns button:disabled { opacity: 0.3; cursor: default; }
+  .undo-redo-btns button:disabled { opacity: 0.35; cursor: default; }
   .enriching-spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--border); border-top-color: var(--accent2); border-radius: 50%; animation: spin .7s linear infinite; margin-left: 4px; vertical-align: middle; }
   tr.enriching-row { opacity: 0.65; }
   tr.enriching-row td { background: rgba(108,99,255,0.04); }
@@ -349,17 +349,16 @@
 
   <div class="results-panel">
     <div class="results-header">
-      <div style="display:flex;align-items:center;gap:10px">
-        <div>
-          <div class="results-title" id="results-title">Results</div>
-          <div class="results-count" id="results-count">Run a search to see contacts</div>
-        </div>
-        <div class="undo-redo-btns">
-          <button id="undo-btn" onclick="undoResults()" disabled title="Undo last result change (↩)">↩</button>
-          <button id="redo-btn" onclick="redoResults()" disabled title="Redo (↪)">↪</button>
-        </div>
+      <div>
+        <div class="results-title" id="results-title">Results</div>
+        <div class="results-count" id="results-count">Run a search to see contacts</div>
       </div>
       <div class="results-actions">
+        <div class="undo-redo-btns">
+          <button id="undo-btn" onclick="undoResults()" disabled title="Undo last result change">↩</button>
+          <button id="redo-btn" onclick="redoResults()" disabled title="Redo">↪</button>
+        </div>
+        <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
         <span class="selected-count" id="selected-count"></span>
         <div class="threshold-wrap" id="threshold-wrap" style="display:none">
           <button class="action-btn" id="enrich-btn" onclick="requestEnrich()" disabled>✨ Enrich</button>
