@@ -53,28 +53,38 @@ FILTER_SYSTEM = """You are a B2B network intelligence assistant helping analyse 
 Your job: given a natural language search request, extract structured filter criteria and return ONLY valid JSON.
 
 The database has these fields:
-- first_name, last_name
+- first_name, last_name (the contact's name)
 - company (column E in LinkedIn export)
 - position (column F in LinkedIn export)
 - connected_on
-- enriched_industry (may be empty)
-- enriched_company_desc (may be empty)
+- location (city/country — populated only after enrichment)
+- enriched_industry (may be empty — populated after enrichment)
+- enriched_company_desc (may be empty — free-text company description, populated after enrichment)
 
 Return JSON with this exact schema:
 {
   "intent_summary": "1-2 sentence plain English summary of what the user is looking for",
+  "name_keywords": ["andrea", "smith"],
+  "location_keywords": ["london", "uk", "berlin"],
+  "requires_location": false,
   "company_keywords": ["list", "of", "company", "name", "fragments"],
   "position_keywords": ["list", "of", "job", "title", "keywords"],
   "position_concepts": ["broader role concepts to match against, e.g. 'revenue leader', 'technical founder'"],
   "seniority_levels": ["C-suite", "VP", "Director", "Manager", "Individual Contributor", "Founder"],
   "industries": ["list of industries if mentioned"],
-  "exclude_keywords": ["words that should NOT appear in company or position"],
+  "description_keywords": ["b2b", "saas", "series a", "marketplace"],
+  "exclude_keywords": ["words that should NOT appear in any field"],
   "confidence_threshold": 0.6
 }
 
-For position_concepts, think broadly. E.g. "head of sales" should match: VP Sales, Chief Revenue Officer, Director of Sales, Head of Revenue, Sales Director, Commercial Director etc.
-For seniority_levels, only include if the user specifies seniority.
-All arrays can be empty [].
+Field guidance:
+- name_keywords: use when user asks for contacts by first or last name (e.g. "all Andreas", "people called Smith"). Match fragments case-insensitively.
+- location_keywords: city, country, or region fragments (e.g. "london", "uk", "germany", "nordics"). Set requires_location: true when the query is primarily location-based.
+- requires_location: true ONLY if location is the primary filter (e.g. "who do I know in Paris"). False for queries that mention location incidentally.
+- description_keywords: free-text concepts to find in enriched company descriptions (e.g. "b2b saas", "fintech", "series a", "marketplace", "enterprise"). Use when user asks about company type or stage.
+- For position_concepts, think broadly. E.g. "head of sales" should match: VP Sales, Chief Revenue Officer, Director of Sales, Head of Revenue, Sales Director, Commercial Director etc.
+- For seniority_levels, only include if the user specifies seniority.
+- All arrays can be empty [].
 Return ONLY the JSON object, no markdown, no explanation."""
 
 
@@ -100,10 +110,19 @@ def extract_filters(user_message: str, conversation_history: list) -> dict:
 def score_connection(conn: dict, filters: dict) -> float:
     score = 0.0
     weights = 0.0
-    position = (conn.get("position") or "").lower()
-    company = (conn.get("company") or "").lower()
-    industry = (conn.get("enriched_industry") or "").lower()
-    desc = (conn.get("enriched_company_desc") or "").lower()
+    position  = (conn.get("position") or "").lower()
+    company   = (conn.get("company") or "").lower()
+    industry  = (conn.get("enriched_industry") or "").lower()
+    desc      = (conn.get("enriched_company_desc") or "").lower()
+    location  = (conn.get("location") or "").lower()
+    full_name = f"{conn.get('first_name') or ''} {conn.get('last_name') or ''}".lower().strip()
+
+    # Name keyword match (first_name / last_name)
+    nk = filters.get("name_keywords", [])
+    if nk:
+        weights += 3.0
+        if any(kw.lower() in full_name for kw in nk):
+            score += 3.0
 
     # Company keyword match
     ck = filters.get("company_keywords", [])
@@ -158,9 +177,24 @@ def score_connection(conn: dict, filters: dict) -> float:
                 score += 1.0
                 break
 
-    # Exclusion penalty
+    # Location keyword match (enriched field — may be empty for unenriched contacts)
+    lk = filters.get("location_keywords", [])
+    if lk:
+        weights += 2.0
+        if any(kw.lower() in location for kw in lk):
+            score += 2.0
+
+    # Description keyword match (free-text enriched_company_desc)
+    dk = filters.get("description_keywords", [])
+    if dk:
+        weights += 1.0
+        if any(kw.lower() in desc for kw in dk):
+            score += 1.0
+
+    # Exclusion penalty — covers position, company, location, and name
     for excl in filters.get("exclude_keywords", []):
-        if excl.lower() in position or excl.lower() in company:
+        excl_l = excl.lower()
+        if excl_l in position or excl_l in company or excl_l in location or excl_l in full_name:
             return 0.0
 
     if weights == 0:

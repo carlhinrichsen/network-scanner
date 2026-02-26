@@ -394,6 +394,42 @@ async def chat(req: ChatMessage, request: Request):
             msg = chat_response(req.message, req.history, db_context)
             return {"type": "chat", "message": msg, "results": [], "total": 0}
 
+        # Location queries require enrichment data — guide user if data is missing
+        if filters.get("requires_location"):
+            enriched   = [c for c in connections if c.get("enriched_at")]
+            unenriched = [c for c in connections if not c.get("enriched_at")]
+            if not enriched:
+                return {
+                    "type": "search",
+                    "message": (
+                        "📍 **Location search requires enrichment data** — I don't have location "
+                        "information for any of your contacts yet.\n\n"
+                        "Try searching by **name, company, or role** first to get a shortlist, "
+                        "then enrich that group. Once enriched, you can refine by location."
+                    ),
+                    "intent": filters.get("intent_summary", ""),
+                    "results": [],
+                    "total": 0,
+                    "filters": filters,
+                }
+            if len(unenriched) > len(enriched):
+                results = filter_connections(connections, filters)
+                summary = synthesise_response(req.message, filters, results, req.history)
+                note = (
+                    f"\n\n⚠️ **{len(unenriched)} of your {len(connections)} contacts "
+                    f"haven't been enriched yet** — location data is missing for them so "
+                    f"they won't appear here. Enrich first for complete results."
+                )
+                return {
+                    "type": "search",
+                    "message": summary + note,
+                    "intent": filters.get("intent_summary", ""),
+                    "results": results,
+                    "total": len(results),
+                    "preview_count": min(20, len(results)),
+                    "filters": filters,
+                }
+
         results = filter_connections(connections, filters)
         summary = synthesise_response(req.message, filters, results, req.history)
         return {
