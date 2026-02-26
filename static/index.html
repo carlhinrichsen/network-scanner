@@ -199,7 +199,7 @@
 
   /* Threshold popover */
   .threshold-wrap { position: relative; display: inline-flex; align-items: center; }
-  .threshold-popover { display: none; position: absolute; bottom: calc(100% + 8px); right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; width: 220px; z-index: 50; box-shadow: 0 4px 20px rgba(0,0,0,.4); }
+  .threshold-popover { display: none; position: fixed; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; width: 230px; z-index: 300; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
   .threshold-popover.open { display: block; }
   .threshold-popover label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.4; }
   .threshold-popover input[type=number] { width: 70px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; color: var(--text); font-size: 13px; font-family: var(--font); }
@@ -568,7 +568,20 @@ function formatMessage(t) {
 // ── Threshold popover ──────────────────────────────────────────────────────
 function toggleThresholdPopover(e) {
   e.stopPropagation();
-  document.getElementById('threshold-popover').classList.toggle('open');
+  const pop = document.getElementById('threshold-popover');
+  const isOpen = pop.classList.contains('open');
+  pop.classList.remove('open');
+  if (isOpen) return;
+
+  // Position below the ⚙ button, right-aligned, clamped to viewport
+  const rect = e.currentTarget.getBoundingClientRect();
+  let top = rect.bottom + 4;
+  let left = rect.right - 230; // right-align to button
+  if (left < 8) left = 8;
+  if (top + 130 > window.innerHeight) top = rect.top - 134; // flip up if too low
+  pop.style.top = top + 'px';
+  pop.style.left = left + 'px';
+  pop.classList.add('open');
 }
 document.addEventListener('click', () => document.getElementById('threshold-popover')?.classList.remove('open'));
 
