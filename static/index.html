@@ -608,6 +608,7 @@ async function sendMessage() {
       auto_enrich_threshold: autoEnrichThreshold,
     };
     if (isGuest) body.guest_data = guestContacts;
+    if (currentResults.length > 0) body.current_result_urls = currentResults.map(r => r.linkedin_url);
     const res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' });
     const data = await res.json();
     conversationHistory.push({role:'user', content:msg});
@@ -847,10 +848,16 @@ const FILTERABLE_COLS = ['last_name','position','company','location','enriched_i
 const DATE_COL = 'connected_on';
 
 function getColValues(col) {
-  // Unique non-empty values for a column across full result set
+  // Unique values for a column across full result set (blanks included, sorted to end)
   const key = col === 'enriched_industry' ? 'enriched_industry' : col;
-  const vals = currentResults.map(r => (r[key]||'').trim()).filter(Boolean);
-  return [...new Set(vals)].sort((a,b) => a.localeCompare(b));
+  const vals = currentResults.map(r => (r[key] ?? '').trim());
+  const unique = [...new Set(vals)];
+  return unique.sort((a, b) => {
+    if (a === '' && b === '') return 0;
+    if (a === '') return 1;
+    if (b === '') return -1;
+    return a.localeCompare(b);
+  });
 }
 
 function getDateParts() {
@@ -1107,11 +1114,24 @@ function applyColFilter(col) {
   const mode = dd._getMode();
   colFilters[col] = { mode, values };
   closeFilterDropdown();
+  // Compute visible set first, sync checkedUrls to it, then render once
+  const visible = applyTableView();
+  const prevChecked = new Set(checkedUrls);
+  checkedUrls = new Set(visible.map(r => r.linkedin_url).filter(url => prevChecked.has(url)));
+  if (checkedUrls.size === 0) checkedUrls = new Set(visible.map(r => r.linkedin_url));
   renderTableBody();
 }
 function clearColFilter(col) {
   delete colFilters[col];
   closeFilterDropdown();
+  // If no other column filters remain, restore full check state; else recalculate from visible
+  const anyOtherFilters = FILTERABLE_COLS.some(c => c !== col && isColFiltered(c));
+  if (!anyOtherFilters) {
+    checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+  } else {
+    const visible = applyTableView();
+    checkedUrls = new Set(visible.map(r => r.linkedin_url));
+  }
   renderTableBody();
 }
 

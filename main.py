@@ -238,6 +238,7 @@ class ChatMessage(BaseModel):
     proposed_db_search: str = ""             # Discovery: pre-approved DB search
     icp_confirmed_enrich: bool = False       # ICP: user confirmed large enrichment
     icp_descriptions: str = ""              # ICP: re-passed when confirming enrichment
+    current_result_urls: list = []          # Frontend current result set (for location_blocked scoping)
 
 class EnrichRequest(BaseModel):
     linkedin_urls: List[str]
@@ -396,29 +397,22 @@ async def chat(req: ChatMessage, request: Request):
 
         # Location queries require enrichment data — guide user if data is missing
         if filters.get("requires_location"):
-            enriched   = [c for c in connections if c.get("enriched_at")]
-            unenriched = [c for c in connections if not c.get("enriched_at")]
-            if not enriched:
+            # Scope check to the current result set (sent by frontend), not the whole DB
+            pool = connections
+            if req.current_result_urls:
+                url_set = set(req.current_result_urls)
+                pool = [c for c in connections if c.get("linkedin_url") in url_set]
+            has_any_location = any(c.get("location") for c in pool)
+            if not has_any_location:
                 return {
                     "type": "location_blocked",
                     "message": (
-                        "📍 **Location search requires enrichment data** — I don't have location "
-                        "information for any of your contacts yet.\n\n"
-                        "Try searching by **name, company, or role** first to get a shortlist, "
-                        "then select those contacts and click **✨ Enrich**. Once enriched, you can refine by location."
+                        "📍 **None of the current contacts have location data yet.**\n\n"
+                        "Select contacts and click **✨ Enrich** to fetch their locations, "
+                        "then refine by location."
                     ),
                 }
-            if len(unenriched) > len(enriched):
-                return {
-                    "type": "location_blocked",
-                    "message": (
-                        f"📍 **Location data is missing for most contacts** — "
-                        f"{len(unenriched)} of your {len(connections)} contacts haven't been enriched yet, "
-                        f"so a location filter would miss most of them.\n\n"
-                        f"Select the contacts you want to check and click **✨ Enrich** first, "
-                        f"then refine by location."
-                    ),
-                }
+            # else: at least one has location — allow the search through
 
         results = filter_connections(connections, filters)
         summary = synthesise_response(req.message, filters, results, req.history)

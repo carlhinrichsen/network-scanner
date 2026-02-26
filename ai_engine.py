@@ -437,7 +437,12 @@ def enrich_contact(linkedin_url: str, company_name: str) -> dict:
             model=HAIKU_MODEL,
             max_tokens=256,
             system="""From the search results about a LinkedIn contact and/or their company, extract:
-- location: the person's city/region (from their LinkedIn profile if visible), or company HQ as fallback. Format: "City, Country" or "City, State" for US. Empty string if not found.
+- location: the person's city/region (from their LinkedIn profile if visible), or company HQ as fallback.
+  Format rules:
+  • US contacts: "City, State, USA" (e.g. "San Francisco, CA, USA" or "Austin, TX, USA")
+  • Non-US contacts: "City, Country" (e.g. "London, UK" or "Berlin, Germany" or "Toronto, Canada")
+  Use standard 2-letter US state abbreviations. Use common country name (not ISO code).
+  Empty string if location cannot be determined.
 - industry: the company's industry sector (e.g. "FinTech", "SaaS", "Healthcare", "Consulting"). Empty string if unknown.
 - description: one concise sentence describing what the company does. Empty string if unknown.
 
