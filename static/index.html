@@ -541,27 +541,27 @@ function clearHistory() {
 // ── Undo / Redo result sets ─────────────────────────────────────────────────
 function pushUndoStack() {
   if (resultHistory.length >= RESULT_HISTORY_LIMIT) resultHistory.shift(); // drop oldest
-  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters });
+  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls) });
   resultFuture = [];
   syncUndoRedoBtns();
 }
 function undoResults() {
   if (!resultHistory.length) return;
-  resultFuture.push({ results: currentResults.map(r => ({...r})), filters: currentFilters });
+  resultFuture.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls) });
   const prev = resultHistory.pop();
   currentResults = prev.results;
   currentFilters = prev.filters;
-  checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+  checkedUrls = prev.checked || new Set(currentResults.map(r => r.linkedin_url));
   renderTable(currentResults, currentResults.length);
   syncUndoRedoBtns();
 }
 function redoResults() {
   if (!resultFuture.length) return;
-  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters });
+  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls) });
   const next = resultFuture.pop();
   currentResults = next.results;
   currentFilters = next.filters;
-  checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+  checkedUrls = next.checked || new Set(currentResults.map(r => r.linkedin_url));
   renderTable(currentResults, currentResults.length);
   syncUndoRedoBtns();
 }
@@ -610,32 +610,44 @@ async function sendMessage() {
       const searchMode = data.filters?.search_mode || 'new';
       const incoming = data.results || [];
 
-      // Save current state to undo stack before mutating
+      // Snapshot before mutating (capture checkedUrls too so undo restores it)
       if (currentResults.length > 0) pushUndoStack();
 
       if (searchMode === 'narrow' && currentResults.length > 0) {
-        // Intersection: keep only contacts in both the current list and the new results
+        // Base = checked rows only (what the user has selected to work within)
+        // If nothing is checked, fall back to all current results
+        const base = checkedUrls.size > 0
+          ? currentResults.filter(r => checkedUrls.has(r.linkedin_url))
+          : currentResults;
+        // Intersect base with incoming (contacts that pass the new filter)
         const incomingUrls = new Set(incoming.map(r => r.linkedin_url));
         const scoreMap = Object.fromEntries(incoming.map(r => [r.linkedin_url, r._score]));
-        // Note: currentResults was already snapshotted in pushUndoStack above, so we read it fresh
-        const prevResults = resultHistory[resultHistory.length - 1]?.results || [];
-        currentResults = prevResults
+        currentResults = base
           .filter(r => incomingUrls.has(r.linkedin_url))
           .map(r => ({...r, _score: scoreMap[r.linkedin_url] ?? r._score}));
+        // Preserve checked state for survivors only
+        checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+
       } else if (searchMode === 'expand' && currentResults.length > 0) {
-        // Union: add new contacts not already in current list, then re-sort by score
-        const prevResults = resultHistory[resultHistory.length - 1]?.results || [];
-        const existingUrls = new Set(prevResults.map(r => r.linkedin_url));
-        const newOnes = incoming.filter(r => !existingUrls.has(r.linkedin_url));
-        currentResults = [...prevResults, ...newOnes]
+        // Base = checked rows (add to the selection the user cares about)
+        // If nothing is checked, fall back to all current results
+        const base = checkedUrls.size > 0
+          ? currentResults.filter(r => checkedUrls.has(r.linkedin_url))
+          : currentResults;
+        const baseUrls = new Set(base.map(r => r.linkedin_url));
+        const newOnes = incoming.filter(r => !baseUrls.has(r.linkedin_url));
+        currentResults = [...base, ...newOnes]
           .sort((a, b) => (b._score || 0) - (a._score || 0));
+        // Check the new additions too
+        newOnes.forEach(r => checkedUrls.add(r.linkedin_url));
+
       } else {
-        // 'new' (or fallback) — full replace
+        // 'new' — full replace, check everything
         currentResults = incoming;
+        checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
       }
 
       currentFilters = data.filters;
-      checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
       enrichingUrls = new Set();
       renderTable(currentResults, currentResults.length);
       document.getElementById('export-btn').disabled = currentResults.length === 0;
