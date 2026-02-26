@@ -571,6 +571,16 @@ function syncUndoRedoBtns() {
   if (u) u.disabled = resultHistory.length === 0;
   if (r) r.disabled = resultFuture.length === 0;
 }
+function patchEnrichmentInHistory(url, fields) {
+  // Keep undo/redo snapshots in sync when enrichment data arrives live.
+  // Without this, undoing would restore a stale pre-enrichment copy of the contact.
+  for (const stack of [resultHistory, resultFuture]) {
+    for (const snapshot of stack) {
+      const contact = snapshot.results.find(r => r.linkedin_url === url);
+      if (contact) Object.assign(contact, fields);
+    }
+  }
+}
 function flashEnrichBtn() {
   const btn = document.getElementById('enrich-btn');
   if (!btn || btn.disabled) return;
@@ -1383,6 +1393,12 @@ async function autoEnrichResults(results) {
           found.enriched_company_desc = detail.description || '';
           found.enriched_at = 'just_now';
           if (urlLocs[c.linkedin_url]) found.location = urlLocs[c.linkedin_url];
+          patchEnrichmentInHistory(c.linkedin_url, {
+            enriched_industry: found.enriched_industry,
+            enriched_company_desc: found.enriched_company_desc,
+            enriched_at: found.enriched_at,
+            location: found.location,
+          });
         }
       }
     } catch(e) {
@@ -1443,6 +1459,12 @@ async function confirmEnrich() {
           c.enriched_company_desc = detail.description || '';
           c.enriched_at = 'just_now';
           if (urlLocs[url]) c.location = urlLocs[url];
+          patchEnrichmentInHistory(url, {
+            enriched_industry: c.enriched_industry,
+            enriched_company_desc: c.enriched_company_desc,
+            enriched_at: c.enriched_at,
+            location: c.location,
+          });
         }
       }
       enriched += urls.length;
