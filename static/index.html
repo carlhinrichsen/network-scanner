@@ -117,6 +117,9 @@
   .linkedin-link { color: var(--accent2); text-decoration: none; font-size: 12px; }
   .linkedin-link:hover { text-decoration: underline; }
   .enriched-pill { font-size: 10px; background: rgba(107,99,255,.2); color: var(--accent2); padding: 1px 6px; border-radius: 10px; margin-left: 4px; }
+  .enriching-spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--border); border-top-color: var(--accent2); border-radius: 50%; animation: spin .7s linear infinite; margin-left: 4px; vertical-align: middle; }
+  tr.enriching-row { opacity: 0.65; }
+  tr.enriching-row td { background: rgba(108,99,255,0.04); }
 
   /* Empty & notices */
   .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); gap: 12px; padding: 40px; text-align: center; }
@@ -339,10 +342,13 @@
         <span class="selected-count" id="selected-count"></span>
         <div class="threshold-wrap" id="threshold-wrap" style="display:none">
           <button class="action-btn" id="enrich-btn" onclick="requestEnrich()" disabled>✨ Enrich</button>
-          <button class="action-btn" style="padding:6px 8px;margin-left:2px" onclick="toggleThresholdPopover(event)" title="Auto-enrich settings">⚙</button>
+          <button class="action-btn" style="padding:6px 8px;margin-left:2px;display:flex;align-items:center;gap:4px" onclick="toggleThresholdPopover(event)" title="Auto-enrich: automatically enrich up to this many unenriched contacts when results load">⚙ <span id="threshold-display" style="font-size:11px;color:var(--muted)">10</span></button>
           <div class="threshold-popover" id="threshold-popover">
-            <label>Auto-enrich ICP contacts if fewer than <strong id="threshold-display">50</strong> are unenriched.<br><span style="font-size:11px">Set to 0 to always ask.</span></label>
-            <input type="number" id="threshold-input" min="0" max="500" value="50" oninput="updateThreshold(this.value)">
+            <label>Auto-enrich contacts when search results load, if fewer than this many are unenriched.<br><span style="font-size:11px;color:var(--muted)">Set to 0 to disable auto-enrich.</span></label>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+              <input type="number" id="threshold-input" min="0" max="500" value="10" oninput="updateThreshold(this.value)" style="width:70px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:13px;font-family:var(--font)">
+              <span style="font-size:12px;color:var(--muted)">contacts</span>
+            </div>
           </div>
         </div>
         <button class="action-btn primary" id="export-btn" onclick="exportCSV()" disabled>⬇ Export CSV</button>
@@ -386,7 +392,8 @@ let pendingEnrichUrls = [];
 let isGuest = false;
 let guestContacts = [];
 let isAdmin = false;
-let autoEnrichThreshold = parseInt(localStorage.getItem('autoEnrichThreshold') || '50', 10);
+let autoEnrichThreshold = parseInt(localStorage.getItem('autoEnrichThreshold') || '10', 10);
+let enrichingUrls = new Set();  // tracks which rows are currently being enriched
 let pendingProposedSearches = [];
 let pendingProposedDbSearch = null;
 let pendingProposedMessage = '';  // the original message to re-send with proposals
@@ -523,9 +530,12 @@ async function sendMessage() {
       currentResults = data.results || [];
       currentFilters = data.filters;
       checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
+      enrichingUrls = new Set();  // reset any prior enrichment state
       renderTable(currentResults, data.total);
       document.getElementById('export-btn').disabled = currentResults.length === 0;
       document.getElementById('enrich-btn').disabled = isGuest || currentResults.length === 0;
+      // Kick off auto-enrich silently in the background
+      if (!isGuest) autoEnrichResults(currentResults);
 
     } else if (data.type === 'icp_comparison') {
       renderICPComparison(data.icp_results);
@@ -982,20 +992,27 @@ function renderRow(r) {
   const score = r._score || 0;
   const sc = score >= .8 ? 'score-high' : score >= .6 ? 'score-mid' : 'score-low';
   const name = [r.first_name, r.last_name].filter(Boolean).join(' ');
-  const enriched = r.enriched_at ? '<span class="enriched-pill">✓</span>' : '';
+  const isEnriching = enrichingUrls.has(r.linkedin_url);
+  const enrichedBadge = r.enriched_at
+    ? '<span class="enriched-pill">✓</span>'
+    : isEnriching
+      ? '<span class="enriching-spinner" title="Enriching…"></span>'
+      : '';
   const loc = r.location ? escHtml(r.location) : '–';
+  const industryText = isEnriching && !r.enriched_industry ? '<span style="color:var(--muted);font-style:italic;font-size:11px">enriching…</span>' : escHtml(r.enriched_industry||'–');
   const checked = checkedUrls.has(r.linkedin_url);
   const rowId = 'row-' + r.linkedin_url.replace(/[^a-z0-9]/gi,'_');
   const escapedUrl = escHtml(r.linkedin_url);
+  const rowClass = [checked ? '' : 'deselected', isEnriching ? 'enriching-row' : ''].filter(Boolean).join(' ');
   return `
-    <tr id="${rowId}" class="${checked ? '' : 'deselected'}">
+    <tr id="${rowId}" class="${rowClass}">
       <td class="check-col"><input type="checkbox" class="row-check" ${checked ? 'checked' : ''} onchange="toggleRow('${escapedUrl}',this.checked)"></td>
       <td><span class="score-badge ${sc}">${Math.round(score*100)}%</span></td>
       <td style="white-space:nowrap;font-weight:500">${escHtml(name)}</td>
-      <td style="max-width:180px">${escHtml(r.position||'–')}${enriched}</td>
+      <td style="max-width:180px">${escHtml(r.position||'–')}${enrichedBadge}</td>
       <td style="white-space:nowrap">${escHtml(r.company||'–')}</td>
       <td style="color:var(--muted);font-size:12px;white-space:nowrap">${loc}</td>
-      <td style="color:var(--muted);font-size:12px">${escHtml(r.enriched_industry||'–')}</td>
+      <td style="color:var(--muted);font-size:12px">${industryText}</td>
       <td style="color:var(--muted);font-size:12px;white-space:nowrap">${r.connected_on||'–'}</td>
       <td><a class="linkedin-link" href="${escapedUrl}" target="_blank">↗</a></td>
     </tr>`;
@@ -1073,9 +1090,58 @@ function renderICPCard(icp) {
 function searchICP(name) { setMode('search'); document.getElementById('chat-input').value=`Find all contacts matching the "${name}" ICP`; sendMessage(); }
 
 // ── Enrichment ─────────────────────────────────────────────────────────────
+// Auto-enrich: fires automatically when search results load, if unenriched <= threshold
+async function autoEnrichResults(results) {
+  if (isGuest || !autoEnrichThreshold) return;
+  const unenriched = results.filter(r => !r.enriched_at && !enrichingUrls.has(r.linkedin_url));
+  if (!unenriched.length) return;
+  if (unenriched.length > autoEnrichThreshold) return; // too many — let user decide manually
+
+  // Mark all as enriching and re-render to show spinners
+  unenriched.forEach(r => enrichingUrls.add(r.linkedin_url));
+  renderTableBody();
+
+  // Group by company — enrich one company at a time (all URLs for that company in one call)
+  const byCompany = {};
+  for (const c of unenriched) {
+    const co = c.company || '';
+    if (!byCompany[co]) byCompany[co] = [];
+    byCompany[co].push(c);
+  }
+
+  for (const [company, contacts] of Object.entries(byCompany)) {
+    const urls = contacts.map(c => c.linkedin_url);
+    try {
+      const res = await fetch('/api/enrich', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ linkedin_urls: urls }),
+        credentials: 'include'
+      });
+      const d = await res.json();
+      // The response has one detail entry per company
+      const detail = (d.details || []).find(det => true) || {};
+      // Update all contacts from this company in currentResults
+      for (const c of contacts) {
+        const found = currentResults.find(r => r.linkedin_url === c.linkedin_url);
+        if (found) {
+          found.enriched_industry = detail.industry || '';
+          found.enriched_company_desc = detail.description || '';
+          found.enriched_at = 'just_now';
+        }
+      }
+    } catch(e) {
+      // silent fail — rows stay un-enriched
+    }
+    urls.forEach(url => enrichingUrls.delete(url));
+    renderTableBody(); // update these rows
+  }
+  loadStats(); // refresh header count
+}
+
 function requestEnrich() {
   if (!currentResults.length || isGuest) return;
-  const unenriched = currentResults.filter(r => !r.enriched_at);
+  const unenriched = currentResults.filter(r => !r.enriched_at && !enrichingUrls.has(r.linkedin_url));
   if (!unenriched.length) { appendMessage('assistant','All contacts already enriched! 🎉'); return; }
   const cos=[...new Set(unenriched.map(r=>r.company).filter(Boolean))];
   pendingEnrichUrls = unenriched.map(r=>r.linkedin_url);
@@ -1085,15 +1151,53 @@ function requestEnrich() {
 async function confirmEnrich() {
   document.getElementById('confirm-banner').classList.remove('active');
   if (!pendingEnrichUrls.length) return;
-  appendMessage('assistant',`🔍 Enriching ${pendingEnrichUrls.length} contacts... this may take a moment.`);
-  document.getElementById('enrich-btn').disabled=true;
-  try {
-    const res=await fetch('/api/enrich',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({linkedin_urls:pendingEnrichUrls}),credentials:'include'});
-    const d=await res.json();
-    appendMessage('assistant',`✅ ${d.message}`);
-    loadStats();
-  } catch(e) { appendMessage('assistant','❌ Enrichment failed. Please try again.'); }
-  document.getElementById('enrich-btn').disabled=false; pendingEnrichUrls=[];
+  const urlsToEnrich = [...pendingEnrichUrls];
+  pendingEnrichUrls = [];
+  appendMessage('assistant', `🔍 Enriching ${urlsToEnrich.length} contacts… rows will update as each completes.`);
+  document.getElementById('enrich-btn').disabled = true;
+
+  // Mark all as enriching and show spinners
+  urlsToEnrich.forEach(url => enrichingUrls.add(url));
+  renderTableBody();
+
+  // Group by company for efficiency
+  const byCompany = {};
+  for (const url of urlsToEnrich) {
+    const c = currentResults.find(r => r.linkedin_url === url);
+    const co = c?.company || '';
+    if (!byCompany[co]) byCompany[co] = [];
+    byCompany[co].push(url);
+  }
+
+  let enriched = 0, failed = 0;
+  for (const [company, urls] of Object.entries(byCompany)) {
+    try {
+      const res = await fetch('/api/enrich', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ linkedin_urls: urls }), credentials: 'include'
+      });
+      const d = await res.json();
+      const detail = (d.details || []).find(det => true) || {};
+      for (const url of urls) {
+        const c = currentResults.find(r => r.linkedin_url === url);
+        if (c) {
+          c.enriched_industry = detail.industry || '';
+          c.enriched_company_desc = detail.description || '';
+          c.enriched_at = 'just_now';
+        }
+      }
+      enriched += urls.length;
+    } catch(e) { failed += urls.length; }
+    urls.forEach(url => enrichingUrls.delete(url));
+    renderTableBody();
+  }
+
+  const msg = failed > 0
+    ? `✅ Enriched ${enriched} contacts. ${failed} failed.`
+    : `✅ Enriched ${enriched} contacts.`;
+  appendMessage('assistant', msg);
+  loadStats();
+  document.getElementById('enrich-btn').disabled = false;
 }
 function cancelEnrich() { document.getElementById('confirm-banner').classList.remove('active'); pendingEnrichUrls=[]; }
 
