@@ -1,16 +1,47 @@
 import os
+import re
 import json
 import anthropic
 from tavily import TavilyClient
 
+# ---------------------------------------------------------------------------
+# CONFIG CONSTANTS — change models / thresholds here, not inline
+# ---------------------------------------------------------------------------
+
+HAIKU_MODEL  = "claude-haiku-4-5"
+SONNET_MODEL = "claude-sonnet-4-5"
+
+ICP_MIN_THRESHOLD  = 0.60   # floor for ICP confidence_threshold
+ICP_THRESHOLD      = 0.65   # default ICP confidence_threshold
+ICP_HIGH_THRESHOLD = 0.75   # "high confidence" ICP match
+SEARCH_THRESHOLD   = 0.50   # default search confidence_threshold
+
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TAVILY_KEY = os.environ.get("TAVILY_KEY", "") or os.environ.get("TAVILY_API_KEY", "")
+
 
 def get_claude():
     return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
+
 def get_tavily():
     return TavilyClient(api_key=TAVILY_KEY)
+
+
+def _parse_json_response(raw: str) -> dict | list:
+    """
+    Safely parse JSON from a Claude response that may be wrapped in markdown fences.
+    Returns {} (or []) on any parse error rather than raising.
+    """
+    text = raw.strip()
+    # Strip markdown code fences: ```json ... ``` or ``` ... ```
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -52,17 +83,14 @@ def extract_filters(user_message: str, conversation_history: list) -> dict:
     messages = conversation_history[-6:] + [{"role": "user", "content": user_message}]
 
     resp = client.messages.create(
-        model="claude-haiku-4-5",
+        model=HAIKU_MODEL,
         max_tokens=1024,
         system=FILTER_SYSTEM,
         messages=messages
     )
-    raw = resp.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw)
+    result = _parse_json_response(resp.content[0].text)
+    # Ensure result is a dict (not a list, not {})
+    return result if isinstance(result, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +169,7 @@ def score_connection(conn: dict, filters: dict) -> float:
 
 
 def filter_connections(connections: list, filters: dict) -> list:
-    threshold = filters.get("confidence_threshold", 0.5)
+    threshold = filters.get("confidence_threshold", SEARCH_THRESHOLD)
     results = []
     for conn in connections:
         s = score_connection(conn, filters)
@@ -162,20 +190,18 @@ Return a JSON array, one object per ICP, each with an added "icp_name" string fi
 IMPORTANT: Be specific and restrictive with keywords. Each ICP must have meaningful position_keywords and/or position_concepts that clearly differentiate it. Set confidence_threshold to 0.65.
 Return ONLY the JSON array."""
 
+
 def extract_icps(user_message: str) -> list:
     client = get_claude()
     resp = client.messages.create(
-        model="claude-haiku-4-5",
+        model=HAIKU_MODEL,
         max_tokens=2048,
         system=ICP_SYSTEM,
         messages=[{"role": "user", "content": user_message}]
     )
-    raw = resp.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw)
+    result = _parse_json_response(resp.content[0].text)
+    return result if isinstance(result, list) else []
+
 
 def compare_icps(connections: list, icp_descriptions: str, auto_enrich_threshold: int = 50, enrich_fn=None, save_fn=None) -> dict:
     """
@@ -227,15 +253,15 @@ def compare_icps(connections: list, icp_descriptions: str, auto_enrich_threshold
                 "enrichment_performed": False,
                 "enrichment_needed": True,
                 "unenriched_count": unenriched_count,
-                "unenriched_urls": [c.get("linkedin_url","") for c in unenriched],
+                "unenriched_urls": [c.get("linkedin_url", "") for c in unenriched],
                 "icp_descriptions": icp_descriptions,
             }
 
     results = []
     for icp in icps:
-        icp["confidence_threshold"] = max(icp.get("confidence_threshold", 0.65), 0.6)
+        icp["confidence_threshold"] = max(icp.get("confidence_threshold", ICP_THRESHOLD), ICP_MIN_THRESHOLD)
         matched = filter_connections(connections, icp)
-        high_confidence = [m for m in matched if m["_score"] >= 0.75]
+        high_confidence = [m for m in matched if m["_score"] >= ICP_HIGH_THRESHOLD]
         results.append({
             "icp_name": icp.get("icp_name", "ICP"),
             "intent_summary": icp.get("intent_summary", ""),
@@ -254,6 +280,7 @@ def compare_icps(connections: list, icp_descriptions: str, auto_enrich_threshold
         "unenriched_urls": [],
         "icp_descriptions": icp_descriptions,
     }
+
 
 def _top_values(values: list, n: int) -> list:
     from collections import Counter
@@ -276,6 +303,7 @@ Structure your response as:
 Be conversational, specific, and helpful. Do not list every contact — the table handles that.
 Keep your response under 200 words."""
 
+
 def synthesise_response(user_message: str, filters: dict, results: list, conversation_history: list) -> str:
     client = get_claude()
 
@@ -292,7 +320,7 @@ Score distribution: high (>=0.8): {len([r for r in results if r['_score'] >= 0.8
 
     messages = conversation_history[-4:] + [{"role": "user", "content": context}]
     resp = client.messages.create(
-        model="claude-haiku-4-5",
+        model=HAIKU_MODEL,
         max_tokens=512,
         system=SYNTHESIS_SYSTEM,
         messages=messages
@@ -343,7 +371,7 @@ def enrich_contact(linkedin_url: str, company_name: str) -> dict:
 
     try:
         resp = client.messages.create(
-            model="claude-haiku-4-5",
+            model=HAIKU_MODEL,
             max_tokens=256,
             system="""From the search results about a LinkedIn contact and/or their company, extract:
 - location: the person's city/region (from their LinkedIn profile if visible), or company HQ as fallback. Format: "City, Country" or "City, State" for US. Empty string if not found.
@@ -353,12 +381,8 @@ def enrich_contact(linkedin_url: str, company_name: str) -> dict:
 Return ONLY valid JSON: {"location": "...", "industry": "...", "description": "..."}""",
             messages=[{"role": "user", "content": f"LinkedIn URL: {linkedin_url}\nCompany: {company_name}\n\nSearch results:\n{snippets[:3000]}"}]
         )
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw)
+        result = _parse_json_response(resp.content[0].text)
+        return result if isinstance(result, dict) and "industry" in result else {"industry": "", "description": "", "location": ""}
     except Exception as e:
         return {"industry": "", "description": f"Lookup failed: {str(e)}", "location": ""}
 
@@ -423,7 +447,7 @@ def discovery_response(
             try:
                 res = tavily.search(query=query, search_depth="basic", max_results=4)
                 snippets = "\n".join([
-                    f"- {r.get('title','')}: {r.get('content','')[:300]}"
+                    f"- {r.get('title', '')}: {r.get('content', '')[:300]}"
                     for r in res.get("results", [])
                 ])
                 web_results_map[query] = snippets
@@ -453,10 +477,10 @@ def discovery_response(
 Database context:
 - {total_count} total LinkedIn connections
 - {companies_count} unique companies
-- {enriched_count} contacts enriched with industry/location data ({round(enriched_count/max(total_count,1)*100)}% enriched)
+- {enriched_count} contacts enriched with industry/location data ({round(enriched_count / max(total_count, 1) * 100)}% enriched)
 
-Sample of database positions (for context): {_top_values([c.get("position","") for c in connections[:500] if c.get("position")], 20)}
-Sample of database companies: {_top_values([c.get("company","") for c in connections[:500] if c.get("company")], 20)}
+Sample of database positions (for context): {_top_values([c.get("position", "") for c in connections[:500] if c.get("position")], 20)}
+Sample of database companies: {_top_values([c.get("company", "") for c in connections[:500] if c.get("company")], 20)}
 """
 
     if web_context:
@@ -467,7 +491,7 @@ Sample of database companies: {_top_values([c.get("company","") for c in connect
     messages = conversation_history[-12:] + [{"role": "user", "content": user_message}]
 
     resp = client.messages.create(
-        model="claude-sonnet-4-5",
+        model=SONNET_MODEL,
         max_tokens=1024,
         system=system,
         messages=messages
@@ -475,7 +499,6 @@ Sample of database companies: {_top_values([c.get("company","") for c in connect
     message_text = resp.content[0].text.strip()
 
     # Extract any proposed searches from the response
-    import re
     new_proposed_searches = re.findall(r'\[SEARCH:\s*([^\]]+)\]', message_text)
     new_proposed_db_search_matches = re.findall(r'\[DB_SEARCH:\s*([^\]]+)\]', message_text)
     new_proposed_db_search = new_proposed_db_search_matches[0] if new_proposed_db_search_matches else None
@@ -512,6 +535,7 @@ You help with:
 
 Be concise, practical, and focused on business development value."""
 
+
 def chat_response(user_message: str, conversation_history: list, context: str = "") -> str:
     client = get_claude()
     system = CHAT_SYSTEM
@@ -520,7 +544,7 @@ def chat_response(user_message: str, conversation_history: list, context: str = 
 
     messages = conversation_history[-10:] + [{"role": "user", "content": user_message}]
     resp = client.messages.create(
-        model="claude-haiku-4-5",
+        model=HAIKU_MODEL,
         max_tokens=512,
         system=system,
         messages=messages

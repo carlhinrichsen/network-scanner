@@ -41,7 +41,8 @@ app = FastAPI(title="Network Scanner")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[APP_BASE_URL],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -54,6 +55,10 @@ if os.path.exists(static_dir):
 async def startup():
     import database as _db
     import auth as _auth
+    # Validate required env vars — warn clearly in logs rather than crashing
+    for var in ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "ANTHROPIC_API_KEY"]:
+        if not os.environ.get(var):
+            print(f"[startup] WARNING: {var} is not set — some features will not work")
     print(f"[startup] DB path (connections): {_db.DB_PATH}")
     print(f"[startup] DB path (auth):        {_auth.DB_PATH}")
     print(f"[startup] DB file exists: {os.path.exists(_db.DB_PATH)}")
@@ -159,8 +164,8 @@ async def google_callback(request: Request, code: str = "", state: str = "", err
     user = upsert_google_user(email, name, picture)
 
     if not user["is_approved"]:
-        # Not approved yet — redirect with a pending message
-        return RedirectResponse(f"/?auth_pending=1&email={email}")
+        # Not approved yet — redirect with a pending message (no email in URL)
+        return RedirectResponse("/?auth_pending=1")
 
     # Approved — create session and redirect home
     token = create_session(user)
@@ -241,22 +246,32 @@ class ExportRequest(BaseModel):
     results: list
 
 # ---------------------------------------------------------------------------
+# Shared CSV helper
+# ---------------------------------------------------------------------------
+
+async def _read_and_parse_csv(file: UploadFile) -> list:
+    """Validate, read, and parse a LinkedIn CSV upload. Raises HTTPException on error."""
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(400, "Only CSV files are supported")
+    content = await file.read()
+    try:
+        return parse_linkedin_csv(content)
+    except Exception as e:
+        raise HTTPException(400, f"Failed to parse CSV: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
 # Upload — private (requires login)
 # ---------------------------------------------------------------------------
 
 @app.post("/api/upload")
 async def upload_csv(request: Request, file: UploadFile = File(...)):
     require_session(request)
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(400, "Only CSV files are supported")
-    content = await file.read()
-    try:
-        rows = parse_linkedin_csv(content)
-    except Exception as e:
-        raise HTTPException(400, f"Failed to parse CSV: {str(e)}")
+    rows = await _read_and_parse_csv(file)
     result = upsert_connections(rows)
     log_upload(file.filename, len(rows), result["added"], result["updated"], result["skipped"])
     return {"success": True, "filename": file.filename, "total_parsed": len(rows), **result}
+
 
 # ---------------------------------------------------------------------------
 # Guest upload — session only, never writes to DB
@@ -264,13 +279,7 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
 
 @app.post("/api/guest/upload")
 async def guest_upload(file: UploadFile = File(...)):
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(400, "Only CSV files are supported")
-    content = await file.read()
-    try:
-        rows = parse_linkedin_csv(content)
-    except Exception as e:
-        raise HTTPException(400, f"Failed to parse CSV: {str(e)}")
+    rows = await _read_and_parse_csv(file)
     return {"success": True, "total_parsed": len(rows), "contacts": rows}
 
 # ---------------------------------------------------------------------------
@@ -455,6 +464,19 @@ async def enrich(req: EnrichRequest, request: Request):
         "enriched": enriched_count,
         "details":  results
     }
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+@app.get("/api/healthz")
+async def healthz():
+    try:
+        s = get_stats()
+        return {"status": "ok", "contacts": s["total"], "enriched": s["enriched"]}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 
 # ---------------------------------------------------------------------------
 # Export — works for both modes
