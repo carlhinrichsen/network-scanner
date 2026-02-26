@@ -197,10 +197,16 @@
   .col-filter-actions { display: flex; gap: 6px; margin-top: 4px; }
   .col-filter-actions button { flex: 1; padding: 6px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; background: transparent; color: var(--text); }
   .col-filter-actions button.apply { background: var(--accent); border-color: var(--accent); color: white; font-weight: 600; }
-  /* Date filter */
-  .date-filter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
-  .date-filter-grid label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; }
-  .date-filter-grid select { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; color: var(--text); font-size: 12px; font-family: var(--font); }
+  /* Date filter tree */
+  .date-tree { max-height: 240px; overflow-y: auto; margin-bottom: 8px; }
+  .date-tree-year { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; user-select: none; font-size: 13px; font-weight: 600; }
+  .date-tree-year .dt-toggle { font-size: 10px; color: var(--muted); width: 12px; display: inline-block; transition: transform .15s; }
+  .date-tree-year .dt-toggle.open { transform: rotate(90deg); }
+  .date-tree-months { padding-left: 22px; display: none; }
+  .date-tree-months.open { display: block; }
+  .date-tree-month { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; cursor: pointer; }
+  .date-tree input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; flex-shrink: 0; }
+  .date-select-all { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 600; }
 
   /* Threshold popover */
   .threshold-wrap { position: relative; display: inline-flex; align-items: center; }
@@ -740,24 +746,30 @@ function getColValues(col) {
 
 function getDateParts() {
   // LinkedIn exports connected_on as "DD MMM YYYY" (e.g. "15 Jan 2023")
-  const monthMap = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
-  const years = new Set(), months = new Set();
+  // Returns { tree: { "2023": ["Jan","Feb",...], ... } } sorted year desc, months in calendar order
+  const MO_ORDER = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const tree = {}; // year → Set of month abbrs
   currentResults.forEach(r => {
     const d = r.connected_on || '';
     const m = d.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
     if (m) {
-      years.add(m[3]);  // "2023"
-      const mo = monthMap[m[2]];
-      if (mo) months.add(String(mo).padStart(2, '0'));  // "01".."12"
+      const yr = m[3], mo = m[2];
+      if (!tree[yr]) tree[yr] = new Set();
+      tree[yr].add(mo);
     }
   });
-  return { years: [...years].sort().reverse(), months: [...months].sort() };
+  // Convert sets to sorted arrays (calendar order), years descending
+  const sorted = {};
+  Object.keys(tree).sort((a,b) => b - a).forEach(yr => {
+    sorted[yr] = MO_ORDER.filter(mo => tree[yr].has(mo));
+  });
+  return sorted; // { "2024": ["Jan","Feb",...], "2023": [...], ... }
 }
 
 function isColFiltered(col) {
   const f = colFilters[col];
   if (!f) return false;
-  if (col === DATE_COL) return !!(f.year || f.month);
+  if (col === DATE_COL) return !!(f.selected && f.selected.size > 0);
   return f.values && f.values.size > 0;
 }
 
@@ -767,13 +779,13 @@ function applyTableView() {
       const f = colFilters[col];
       if (!f) continue;
       if (col === DATE_COL) {
-        if (!f.year && !f.month) continue;
+        if (!f.selected || f.selected.size === 0) continue;
         const d = r.connected_on || '';
-        // LinkedIn format: "15 Jan 2023" — year is a plain substring, month needs name lookup
-        const moNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        const yrMatch = !f.year || d.includes(f.year);
-        const moMatch = !f.month || d.includes(moNames[parseInt(f.month)] || '');
-        if (!yrMatch || !moMatch) return false;
+        const m = d.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
+        if (!m) return false;
+        // key is "YYYY-Mon" (e.g. "2023-Jan") — must be in the selected set
+        const key = `${m[3]}-${m[2]}`;
+        if (!f.selected.has(key)) return false;
       } else {
         if (!f.values || f.values.size === 0) continue;
         const val = (r[col] || '').trim();
@@ -996,29 +1008,132 @@ function clearColFilter(col) {
 
 // ── Date filter builder ────────────────────────────────────────────────────
 function buildDateFilter(dropdown, col) {
-  const f = colFilters[col] || { year: '', month: '' };
-  const { years, months } = getDateParts();
-  const monthNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const tree = getDateParts(); // { "2024": ["Jan","Feb",...], ... }
+  const existing = colFilters[col]?.selected || new Set();
 
-  const yearOpts = `<option value="">All years</option>` + years.map(y => `<option value="${y}" ${f.year===y?'selected':''}>${y}</option>`).join('');
-  const monthOpts = `<option value="">All months</option>` + months.map(m => `<option value="${m}" ${f.month===m?'selected':''}>${monthNames[parseInt(m)]||m}</option>`).join('');
+  // Build total set of all keys for "Select All" logic
+  const allKeys = [];
+  Object.entries(tree).forEach(([yr, months]) => months.forEach(mo => allKeys.push(`${yr}-${mo}`)));
+  const allSelected = allKeys.length > 0 && allKeys.every(k => existing.has(k));
+
+  // Build HTML
+  let treeHtml = '';
+  Object.entries(tree).forEach(([yr, months]) => {
+    const yrKeys = months.map(mo => `${yr}-${mo}`);
+    const yrAllChecked = yrKeys.every(k => existing.has(k));
+    const yrSomeChecked = yrKeys.some(k => existing.has(k));
+    // Start years expanded if any of their months are selected (or if only 1-2 years)
+    const startOpen = yrSomeChecked || Object.keys(tree).length <= 2;
+    treeHtml += `
+      <div class="date-tree-year" onclick="dtToggleYear(this,'${yr}')">
+        <span class="dt-toggle ${startOpen?'open':''}">▶</span>
+        <input type="checkbox" id="dty-${yr}" ${yrAllChecked?'checked':''} data-indeterminate="${yrSomeChecked && !yrAllChecked}" onclick="event.stopPropagation();dtToggleYearCheck('${yr}','${col}')">
+        <label for="dty-${yr}" onclick="event.stopPropagation()">${yr}</label>
+      </div>
+      <div class="date-tree-months ${startOpen?'open':''}">
+        ${months.map(mo => {
+          const key = `${yr}-${mo}`;
+          return `<div class="date-tree-month">
+            <input type="checkbox" id="dtm-${key}" ${existing.has(key)?'checked':''} onchange="dtToggleMonth('${key}','${yr}','${col}')">
+            <label for="dtm-${key}">${mo}</label>
+          </div>`;
+        }).join('')}
+      </div>`;
+  });
 
   dropdown.innerHTML = `
-    <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Filter by date connected</div>
-    <div class="date-filter-grid">
-      <div><label>Year</label><select id="df-year">${yearOpts}</select></div>
-      <div><label>Month</label><select id="df-month">${monthOpts}</select></div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Filter by date connected</div>
+    <div class="date-select-all">
+      <input type="checkbox" id="dt-selectall" ${allSelected?'checked':''} onchange="dtToggleAll('${col}',this.checked)">
+      <label for="dt-selectall">(Select All)</label>
     </div>
+    <div class="date-tree">${treeHtml}</div>
     <div class="col-filter-actions">
       <button onclick="clearColFilter('${col}')">Clear</button>
-      <button class="apply" onclick="applyDateFilter('${col}')">Apply Filter</button>
+      <button class="apply" onclick="applyDateFilter('${col}')">Apply</button>
     </div>`;
+
+  // Set indeterminate state after render
+  Object.entries(tree).forEach(([yr, months]) => {
+    const yrKeys = months.map(mo => `${yr}-${mo}`);
+    const yrAllChecked = yrKeys.every(k => existing.has(k));
+    const yrSomeChecked = yrKeys.some(k => existing.has(k));
+    const el = document.getElementById(`dty-${yr}`);
+    if (el) el.indeterminate = yrSomeChecked && !yrAllChecked;
+  });
 }
+
+function dtToggleYear(row, yr) {
+  // Toggle expand/collapse on the months panel
+  const toggle = row.querySelector('.dt-toggle');
+  const panel = row.nextElementSibling;
+  const open = panel.classList.toggle('open');
+  if (toggle) toggle.classList.toggle('open', open);
+}
+
+function dtToggleYearCheck(yr, col) {
+  // Check/uncheck all months under a year immediately (live filter)
+  const tree = getDateParts();
+  const months = tree[yr] || [];
+  const yrEl = document.getElementById(`dty-${yr}`);
+  const checked = yrEl?.checked;
+  months.forEach(mo => {
+    const key = `${yr}-${mo}`;
+    const el = document.getElementById(`dtm-${key}`);
+    if (el) el.checked = checked;
+  });
+  _dtSyncSelectAll();
+}
+
+function dtToggleMonth(key, yr, col) {
+  // After toggling a month, sync the parent year checkbox state
+  const tree = getDateParts();
+  const months = tree[yr] || [];
+  const yrKeys = months.map(mo => `${yr}-${mo}`);
+  const checkedCount = yrKeys.filter(k => document.getElementById(`dtm-${k}`)?.checked).length;
+  const yrEl = document.getElementById(`dty-${yr}`);
+  if (yrEl) {
+    yrEl.checked = checkedCount === yrKeys.length;
+    yrEl.indeterminate = checkedCount > 0 && checkedCount < yrKeys.length;
+  }
+  _dtSyncSelectAll();
+}
+
+function dtToggleAll(col, checked) {
+  // Check/uncheck everything
+  const tree = getDateParts();
+  Object.entries(tree).forEach(([yr, months]) => {
+    const yrEl = document.getElementById(`dty-${yr}`);
+    if (yrEl) { yrEl.checked = checked; yrEl.indeterminate = false; }
+    months.forEach(mo => {
+      const el = document.getElementById(`dtm-${yr}-${mo}`);
+      if (el) el.checked = checked;
+    });
+  });
+}
+
+function _dtSyncSelectAll() {
+  const tree = getDateParts();
+  const allKeys = [];
+  Object.entries(tree).forEach(([yr, months]) => months.forEach(mo => allKeys.push(`${yr}-${mo}`)));
+  const allChecked = allKeys.length > 0 && allKeys.every(k => document.getElementById(`dtm-${k}`)?.checked);
+  const someChecked = allKeys.some(k => document.getElementById(`dtm-${k}`)?.checked);
+  const el = document.getElementById('dt-selectall');
+  if (el) { el.checked = allChecked; el.indeterminate = someChecked && !allChecked; }
+}
+
 function applyDateFilter(col) {
-  const year = document.getElementById('df-year')?.value || '';
-  const month = document.getElementById('df-month')?.value || '';
-  if (!year && !month) { delete colFilters[col]; }
-  else { colFilters[col] = { year, month }; }
+  // Collect all checked month keys from the DOM
+  const tree = getDateParts();
+  const selected = new Set();
+  Object.entries(tree).forEach(([yr, months]) => {
+    months.forEach(mo => {
+      const key = `${yr}-${mo}`;
+      if (document.getElementById(`dtm-${key}`)?.checked) selected.add(key);
+    });
+  });
+  if (selected.size === 0) { delete colFilters[col]; }
+  else { colFilters[col] = { selected }; }
   closeFilterDropdown();
   renderTableBody();
 }
@@ -1159,6 +1274,7 @@ async function autoEnrichResults(results) {
       const d = await res.json();
       // The response has one detail entry per company
       const detail = (d.details || []).find(det => true) || {};
+      const urlLocs = detail.url_locations || {};
       // Update all contacts from this company in currentResults
       for (const c of contacts) {
         const found = currentResults.find(r => r.linkedin_url === c.linkedin_url);
@@ -1166,6 +1282,7 @@ async function autoEnrichResults(results) {
           found.enriched_industry = detail.industry || '';
           found.enriched_company_desc = detail.description || '';
           found.enriched_at = 'just_now';
+          if (urlLocs[c.linkedin_url]) found.location = urlLocs[c.linkedin_url];
         }
       }
     } catch(e) {
@@ -1216,12 +1333,14 @@ async function confirmEnrich() {
       });
       const d = await res.json();
       const detail = (d.details || []).find(det => true) || {};
+      const urlLocs = detail.url_locations || {};
       for (const url of urls) {
         const c = currentResults.find(r => r.linkedin_url === url);
         if (c) {
           c.enriched_industry = detail.industry || '';
           c.enriched_company_desc = detail.description || '';
           c.enriched_at = 'just_now';
+          if (urlLocs[url]) c.location = urlLocs[url];
         }
       }
       enriched += urls.length;

@@ -436,6 +436,7 @@ async def enrich(req: EnrichRequest, request: Request):
     company_cache: dict = {}
 
     for company, urls in to_enrich.items():
+        url_locations: dict = {}
         for url in urls:
             data = enrich_contact(url, company)
             location    = data.get("location", "")
@@ -449,6 +450,7 @@ async def enrich(req: EnrichRequest, request: Request):
             if company not in company_cache:
                 company_cache[company] = {"industry": industry, "description": description}
 
+            url_locations[url] = location
             save_enrichment(url, industry, description, location)
             enriched_count += 1
 
@@ -456,7 +458,8 @@ async def enrich(req: EnrichRequest, request: Request):
             "company":          company,
             "industry":         company_cache.get(company, {}).get("industry", ""),
             "description":      company_cache.get(company, {}).get("description", ""),
-            "contacts_updated": len(urls)
+            "contacts_updated": len(urls),
+            "url_locations":    url_locations,
         })
 
     return {
