@@ -1146,7 +1146,8 @@ function renderRow(r) {
   // Location: show spinner while enriching (location is enriched data)
   const locText = r.location ? escHtml(r.location) : '–';
   const locSpinner = isEnriching ? ' <span class="enriching-spinner" title="Enriching…"></span>' : '';
-  const loc = locText + locSpinner;
+  const locPill = (r.enriched_at && r.location) ? ' <span class="enriched-pill">✓</span>' : '';
+  const loc = locText + locSpinner + locPill;
   // Industry: show "enriching…" while in progress, value + ✓ pill when done
   const industryDisplay = r.enriched_at
     ? escHtml(r.enriched_industry||'–') + ' <span class="enriched-pill">✓</span>'
