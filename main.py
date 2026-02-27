@@ -59,9 +59,11 @@ async def startup():
     for var in ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "ANTHROPIC_API_KEY"]:
         if not os.environ.get(var):
             print(f"[startup] WARNING: {var} is not set — some features will not work")
-    print(f"[startup] DB path (connections): {_db.DB_PATH}")
-    print(f"[startup] DB path (auth):        {_auth.DB_PATH}")
-    print(f"[startup] DB file exists: {os.path.exists(_db.DB_PATH)}")
+    db_url = _db.DATABASE_URL
+    masked = db_url[:30] + "..." if len(db_url) > 30 else db_url
+    print(f"[startup] DATABASE_URL: {masked}")
+    if not db_url:
+        print("[startup] WARNING: DATABASE_URL is not set — database will not work")
     init_db()
     init_auth_db()
     # Log contact count so we can confirm data survived the deploy
