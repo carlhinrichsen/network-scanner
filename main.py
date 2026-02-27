@@ -460,7 +460,8 @@ async def enrich(req: EnrichRequest, request: Request):
     for company, urls in to_enrich.items():
         url_locations: dict = {}
         for url in urls:
-            data = enrich_contact(url, company)
+            c = conn_map.get(url, {})
+            data = enrich_contact(url, company, c.get("first_name", ""), c.get("last_name", ""))
             location    = data.get("location", "")
             industry    = data.get("industry", "")
             description = data.get("description", "")

@@ -312,7 +312,7 @@ def compare_icps(connections: list, icp_descriptions: str, auto_enrich_threshold
                 url = c.get("linkedin_url", "")
                 company = c.get("company", "")
                 try:
-                    data = enrich_fn(url, company)
+                    data = enrich_fn(url, company, c.get("first_name", ""), c.get("last_name", ""))
                     industry = data.get("industry", "")
                     description = data.get("description", "")
                     location = data.get("location", "")
@@ -419,59 +419,82 @@ Score distribution: high (>=0.8): {len([r for r in results if r['_score'] >= 0.8
 # ENRICHMENT (online lookup via Tavily)
 # ---------------------------------------------------------------------------
 
-def enrich_contact(linkedin_url: str, company_name: str) -> dict:
+def enrich_contact(linkedin_url: str, company_name: str, first_name: str = "", last_name: str = "") -> dict:
     """
     Enrich a contact with location, industry, and company description.
     Strategy:
-    1. PRIMARY: Fetch the contact's public LinkedIn profile URL via Tavily
-    2. FALLBACK: Search for the company + LinkedIn company page
+    1. PRIMARY: Search by person's name + LinkedIn (best chance of finding actual profile)
+    2. SECONDARY: Direct LinkedIn URL search via Tavily
+    3. Company search: used only for industry/description — never for location
     """
     tavily = get_tavily()
     client = get_claude()
-    snippets = ""
 
-    try:
-        profile_result = tavily.search(
-            query=linkedin_url,
-            search_depth="basic",
-            max_results=2,
-            include_domains=["linkedin.com"]
-        )
-        snippets = " ".join([r.get("content", "") for r in profile_result.get("results", [])])
-    except Exception:
-        pass
+    # Derive person name: use provided names, fall back to URL slug
+    url_slug = linkedin_url.rstrip('/').split('/')[-1].replace('-', ' ').replace('_', ' ')
+    person_name = f"{first_name} {last_name}".strip() or url_slug
 
-    if len(snippets.strip()) < 100 and company_name:
+    profile_snippets = ""
+
+    # Strategy 1: name-based search — most reliable for finding the actual profile location
+    if person_name:
+        try:
+            name_result = tavily.search(
+                query=f"{person_name} linkedin",
+                search_depth="basic",
+                max_results=3,
+                include_domains=["linkedin.com"]
+            )
+            profile_snippets = " ".join([r.get("content", "") for r in name_result.get("results", [])])
+        except Exception:
+            pass
+
+    # Strategy 2: direct URL lookup if name search came up short
+    if len(profile_snippets.strip()) < 100:
+        try:
+            url_result = tavily.search(
+                query=linkedin_url,
+                search_depth="basic",
+                max_results=2,
+                include_domains=["linkedin.com"]
+            )
+            profile_snippets += " ".join([r.get("content", "") for r in url_result.get("results", [])])
+        except Exception:
+            pass
+
+    # Strategy 3: company search — for industry/description only, never used to infer location
+    company_snippets = ""
+    if company_name:
         try:
             company_result = tavily.search(
-                query=f"{company_name} LinkedIn company page headquarters location industry",
+                query=f"{company_name} LinkedIn company page industry",
                 search_depth="basic",
                 max_results=3
             )
             company_snippets = " ".join([r.get("content", "") for r in company_result.get("results", [])])
-            snippets = snippets + "\n" + company_snippets
         except Exception:
             pass
 
-    if not snippets.strip():
+    if not profile_snippets.strip() and not company_snippets.strip():
         return {"industry": "", "description": "", "location": ""}
 
     try:
         resp = client.messages.create(
             model=HAIKU_MODEL,
             max_tokens=256,
-            system="""From the search results about a LinkedIn contact and/or their company, extract:
-- location: the person's city/region (from their LinkedIn profile if visible), or company HQ as fallback.
+            system="""From the search results about a LinkedIn contact and their company, extract:
+- location: the person's OWN current city/region as stated on their LinkedIn profile.
+  CRITICAL: Use ONLY the person's stated location — never infer from company HQ or office locations.
+  Return empty string if the person's location is not explicitly visible in the profile data.
   Format rules:
   • US contacts: "City, State, USA" (e.g. "San Francisco, CA, USA" or "Austin, TX, USA")
-  • Non-US contacts: "City, Country" (e.g. "London, UK" or "Berlin, Germany" or "Toronto, Canada")
+  • Non-US contacts: "City, Country" (e.g. "London, UK" or "Berlin, Germany" or "Bucharest, Romania")
   Use standard 2-letter US state abbreviations. Use common country name (not ISO code).
-  Empty string if location cannot be determined.
 - industry: the company's industry sector (e.g. "FinTech", "SaaS", "Healthcare", "Consulting"). Empty string if unknown.
 - description: one concise sentence describing what the company does. Empty string if unknown.
 
 Return ONLY valid JSON: {"location": "...", "industry": "...", "description": "..."}""",
-            messages=[{"role": "user", "content": f"LinkedIn URL: {linkedin_url}\nCompany: {company_name}\n\nSearch results:\n{snippets[:3000]}"}]
+            messages=[{"role": "user", "content": f"LinkedIn URL: {linkedin_url}\nPerson: {person_name}\nCompany: {company_name}\n\nProfile search results:\n{profile_snippets[:2500]}\n\nCompany search results:\n{company_snippets[:1000]}"}]
         )
         result = _parse_json_response(resp.content[0].text)
         return result if isinstance(result, dict) and "industry" in result else {"industry": "", "description": "", "location": ""}
