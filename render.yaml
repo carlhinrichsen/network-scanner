@@ -9,9 +9,5 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
-      - key: DB_PATH
-        value: /data/connections.db
-    disk:
-      name: network-scanner-data
-      mountPath: /data
-      sizeGB: 1
+      - key: DATABASE_URL
+        sync: false

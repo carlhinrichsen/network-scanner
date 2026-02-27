@@ -3,24 +3,18 @@ Auth layer — Google OAuth only.
 - No passwords stored anywhere
 - Google verifies the email actually exists and belongs to the user
 - Auto-approve logic: execfunctions.co domain (or any APPROVED_DOMAINS) + admin whitelist
-- Sessions stored server-side in SQLite
+- Sessions stored server-side in PostgreSQL (shared pool from database.py)
 """
 import os
 import secrets
 from datetime import datetime, timedelta
-import sqlite3
+import psycopg2.extras
 
-DB_PATH = os.environ.get("DB_PATH", "data/connections.db")
+from database import get_conn, return_conn
+
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").lower().strip()
 APPROVED_DOMAINS = [d.lower().strip() for d in os.environ.get("APPROVED_DOMAINS", "execfunctions.co").split(",") if d.strip()]
 SESSION_TTL_HOURS = 720  # 30 days
-
-
-def get_conn():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def init_auth_db():
@@ -29,7 +23,7 @@ def init_auth_db():
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 email TEXT UNIQUE NOT NULL,
                 name TEXT,
                 picture TEXT,
@@ -51,8 +45,11 @@ def init_auth_db():
             )
         """)
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def _is_auto_approved(email: str) -> bool:
@@ -73,36 +70,42 @@ def upsert_google_user(email: str, name: str, picture: str) -> dict:
     email = email.lower().strip()
     conn = get_conn()
     try:
-        c = conn.cursor()
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         now = datetime.utcnow().isoformat()
 
-        existing = c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        c.execute("SELECT * FROM users WHERE email=%s", (email,))
+        existing = c.fetchone()
         is_admin = 1 if email == ADMIN_EMAIL else 0
         auto_approved = _is_auto_approved(email)
 
         if existing:
             # Update profile info and last login
             c.execute("""
-                UPDATE users SET name=?, picture=?, last_login=?, is_admin=?
-                WHERE email=?
+                UPDATE users SET name=%s, picture=%s, last_login=%s, is_admin=%s
+                WHERE email=%s
             """, (name, picture, now, is_admin, email))
             # Auto-approve if domain matches but wasn't approved before
             if auto_approved and not existing["is_approved"]:
-                c.execute("UPDATE users SET is_approved=1, approved_at=? WHERE email=?", (now, email))
+                c.execute("UPDATE users SET is_approved=1, approved_at=%s WHERE email=%s", (now, email))
             conn.commit()
-            user = dict(c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone())
+            c.execute("SELECT * FROM users WHERE email=%s", (email,))
+            user = dict(c.fetchone())
         else:
             approved = 1 if auto_approved else 0
             c.execute("""
                 INSERT INTO users (email, name, picture, is_approved, is_admin, approved_at, last_login)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (email, name, picture, approved, is_admin, now if approved else None, now))
             conn.commit()
-            user = dict(c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone())
+            c.execute("SELECT * FROM users WHERE email=%s", (email,))
+            user = dict(c.fetchone())
 
         return user
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def create_session(user: dict) -> str:
@@ -111,13 +114,17 @@ def create_session(user: dict) -> str:
     expires = (datetime.utcnow() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
     conn = get_conn()
     try:
-        conn.execute("""
+        c = conn.cursor()
+        c.execute("""
             INSERT INTO sessions (token, user_id, email, is_admin, expires_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
         """, (token, user["id"], user["email"], user["is_admin"], expires))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        return_conn(conn)
     return token
 
 
@@ -127,14 +134,16 @@ def validate_session(token: str):
         return None
     conn = get_conn()
     try:
-        session = conn.execute("SELECT * FROM sessions WHERE token=?", (token,)).fetchone()
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        c.execute("SELECT * FROM sessions WHERE token=%s", (token,))
+        session = c.fetchone()
         if not session:
             return None
         if datetime.utcnow().isoformat() > session["expires_at"]:
             return None
         return dict(session)
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def refresh_session(token: str):
@@ -142,59 +151,77 @@ def refresh_session(token: str):
     new_expiry = (datetime.utcnow() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
     conn = get_conn()
     try:
-        conn.execute("UPDATE sessions SET expires_at=? WHERE token=?", (new_expiry, token))
+        c = conn.cursor()
+        c.execute("UPDATE sessions SET expires_at=%s WHERE token=%s", (new_expiry, token))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def logout_user(token: str):
     conn = get_conn()
     try:
-        conn.execute("DELETE FROM sessions WHERE token=?", (token,))
+        c = conn.cursor()
+        c.execute("DELETE FROM sessions WHERE token=%s", (token,))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def get_all_users() -> list:
     conn = get_conn()
     try:
-        rows = conn.execute(
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        c.execute(
             "SELECT id, email, name, is_approved, is_admin, created_at, approved_at, last_login FROM users ORDER BY created_at DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in c.fetchall()]
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def get_pending_users() -> list:
     conn = get_conn()
     try:
-        rows = conn.execute(
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        c.execute(
             "SELECT id, email, name, picture, created_at FROM users WHERE is_approved=0 ORDER BY created_at DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in c.fetchall()]
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def approve_user(user_id: int):
     conn = get_conn()
     try:
+        c = conn.cursor()
         now = datetime.utcnow().isoformat()
-        conn.execute("UPDATE users SET is_approved=1, approved_at=? WHERE id=?", (now, user_id))
+        c.execute("UPDATE users SET is_approved=1, approved_at=%s WHERE id=%s", (now, user_id))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def revoke_user(user_id: int):
     conn = get_conn()
     try:
-        conn.execute("UPDATE users SET is_approved=0 WHERE id=?", (user_id,))
+        c = conn.cursor()
+        c.execute("UPDATE users SET is_approved=0 WHERE id=%s", (user_id,))
         # Kill their active sessions
-        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        c.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        return_conn(conn)
