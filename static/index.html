@@ -276,7 +276,7 @@
 
     <div style="text-align:center;margin-top:20px;margin-bottom:4px">
       <div style="font-size:14px;font-weight:600;color:var(--text)">Relationship Intelligence</div>
-      <div style="font-size:13px;color:var(--muted)">by <a href="https://execfunctions.co" target="_blank" rel="noopener" style="color:var(--accent2);text-decoration:none">Exec Functions</a></div>
+      <div style="font-size:13px;color:var(--muted)">by <a href="https://execfunctions.co" target="_blank" rel="noopener" style="color:var(--accent2);text-decoration:none;display:inline-flex;align-items:center;gap:5px"><img src="/static/ef_brain.png" style="height:16px;width:auto;vertical-align:middle;opacity:.85">Exec Functions</a></div>
     </div>
 
     <div style="margin-top:16px;display:flex;flex-direction:column;gap:6px;margin-bottom:4px">
@@ -325,7 +325,10 @@
 <div class="header" id="main-header" style="display:none">
   <div class="logo">
     <img class="logo-img" id="logo-img" src="/static/logo.png" onerror="this.style.display='none'" alt="">
-    <div class="logo-text">Network<span>Scanner</span></div>
+    <div>
+      <div class="logo-text">Network<span>Scanner</span></div>
+      <a href="https://execfunctions.co" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:10px;opacity:0.5;transition:opacity .2s;margin-top:1px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'"><img src="/static/ef_brain.png" style="height:11px;width:auto">Exec Functions</a>
+    </div>
   </div>
   <div class="stats-bar" id="stats-bar" style="display:none">
     <div class="stat"><div class="stat-value" id="stat-total">–</div><div class="stat-label">Contacts</div></div>
