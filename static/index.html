@@ -1297,16 +1297,16 @@ function renderRow(r) {
   const sc = score >= .8 ? 'score-high' : score >= .6 ? 'score-mid' : 'score-low';
   const name = [r.first_name, r.last_name].filter(Boolean).join(' ');
   const isEnriching = enrichingUrls.has(r.linkedin_url);
-  // Location: show spinner while enriching (location is enriched data)
+  const enrichingBadge = isEnriching ? '<span style="color:var(--muted);font-style:italic;font-size:11px">enriching…</span> <span class="enriching-spinner" title="Enriching…"></span>' : '';
+  // Location: show spinner + text while enriching
   const locText = r.location ? escHtml(r.location) : '–';
-  const locSpinner = isEnriching ? ' <span class="enriching-spinner" title="Enriching…"></span>' : '';
   const locPill = (r.enriched_at && r.location) ? ' <span class="enriched-pill">✓</span>' : '';
-  const loc = locText + locSpinner + locPill;
-  // Industry: show "enriching…" while in progress, value + ✓ pill when done
+  const loc = isEnriching ? enrichingBadge : locText + locPill;
+  // Industry: show spinner + text while enriching (consistent with location)
   const industryDisplay = r.enriched_at
     ? escHtml(r.enriched_industry||'–') + ' <span class="enriched-pill">✓</span>'
     : isEnriching
-      ? '<span style="color:var(--muted);font-style:italic;font-size:11px">enriching…</span>'
+      ? enrichingBadge
       : escHtml(r.enriched_industry||'–');
   const checked = checkedUrls.has(r.linkedin_url);
   const rowId = 'row-' + r.linkedin_url.replace(/[^a-z0-9]/gi,'_');
