@@ -87,6 +87,7 @@
   .msg-bubble { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
   .msg.user .msg-bubble { background: var(--accent); color: white; border-bottom-right-radius: 4px; }
   .msg.assistant .msg-bubble { background: var(--surface2); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg.result-active .msg-bubble { border-left: 3px solid var(--accent2); background: rgba(108,99,255,0.09); transition: background .3s; }
   .msg-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
   .msg.user .msg-meta { text-align: right; }
   .chat-input-area { padding: 12px; border-top: 1px solid var(--border); background: var(--surface); }
@@ -441,6 +442,7 @@ let guestContacts = [];
 let isAdmin = false;
 let autoEnrichThreshold = parseInt(localStorage.getItem('autoEnrichThreshold') || '10', 10);
 let enrichingUrls = new Set();  // tracks which rows are currently being enriched
+let currentResultsMsgEl = null; // chat bubble that produced currentResults (for undo/redo highlight)
 let pendingProposedSearches = [];
 let pendingProposedDbSearch = null;
 let pendingProposedMessage = '';  // the original message to re-send with proposals
@@ -552,7 +554,8 @@ function clearHistory() {
   conversationHistory = [];
   document.getElementById('chat-messages').innerHTML = '';
   currentResults = []; colFilters = {}; enrichingUrls = new Set(); checkedUrls = new Set();
-  resultHistory = []; resultFuture = [];
+  resultHistory = []; resultFuture = []; currentResultsMsgEl = null;
+  highlightResultMsg(null);
   closeFilterDropdown();
   document.getElementById('results-title').textContent = 'Results';
   document.getElementById('results-count').textContent = 'Run a search to see contacts';
@@ -566,28 +569,36 @@ function clearHistory() {
 // ── Undo / Redo result sets ─────────────────────────────────────────────────
 function pushUndoStack() {
   if (resultHistory.length >= RESULT_HISTORY_LIMIT) resultHistory.shift(); // drop oldest
-  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls) });
+  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls), msgEl: currentResultsMsgEl });
   resultFuture = [];
   syncUndoRedoBtns();
 }
+function highlightResultMsg(el) {
+  document.querySelectorAll('.msg.result-active').forEach(m => m.classList.remove('result-active'));
+  if (el) { el.classList.add('result-active'); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+}
 function undoResults() {
   if (!resultHistory.length) return;
-  resultFuture.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls) });
+  resultFuture.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls), msgEl: currentResultsMsgEl });
   const prev = resultHistory.pop();
   currentResults = prev.results;
   currentFilters = prev.filters;
   checkedUrls = prev.checked || new Set(currentResults.map(r => r.linkedin_url));
+  currentResultsMsgEl = prev.msgEl || null;
   renderTable(currentResults, currentResults.length);
+  highlightResultMsg(currentResultsMsgEl);
   syncUndoRedoBtns();
 }
 function redoResults() {
   if (!resultFuture.length) return;
-  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls) });
+  resultHistory.push({ results: currentResults.map(r => ({...r})), filters: currentFilters, checked: new Set(checkedUrls), msgEl: currentResultsMsgEl });
   const next = resultFuture.pop();
   currentResults = next.results;
   currentFilters = next.filters;
   checkedUrls = next.checked || new Set(currentResults.map(r => r.linkedin_url));
+  currentResultsMsgEl = next.msgEl || null;
   renderTable(currentResults, currentResults.length);
+  highlightResultMsg(currentResultsMsgEl);
   syncUndoRedoBtns();
 }
 function syncUndoRedoBtns() {
@@ -684,8 +695,10 @@ async function sendMessage() {
       }
 
       currentFilters = data.filters;
+      currentResultsMsgEl = typingEl;
       enrichingUrls = new Set();
       renderTable(currentResults, currentResults.length);
+      highlightResultMsg(currentResultsMsgEl);
       document.getElementById('export-btn').disabled = currentResults.length === 0;
       document.getElementById('enrich-btn').disabled = isGuest || currentResults.length === 0;
       syncUndoRedoBtns();
@@ -707,8 +720,10 @@ async function sendMessage() {
       // Show web results if any were run
       if (data.db_results && data.db_results.length > 0) {
         currentResults = data.db_results;
+        currentResultsMsgEl = typingEl;
         checkedUrls = new Set(currentResults.map(r => r.linkedin_url));
         renderTable(currentResults, data.total);
+        highlightResultMsg(currentResultsMsgEl);
         document.getElementById('export-btn').disabled = false;
       }
       // Surface proposed searches for user confirmation
@@ -1555,11 +1570,14 @@ async function exportCSV() {
 }
 
 // ── Upload ─────────────────────────────────────────────────────────────────
+let _pendingUploadFile = null;  // stored after preview so Confirm can re-use it
+
 function openUpload() { document.getElementById('upload-overlay').classList.add('active'); }
 function closeUpload() {
   document.getElementById('upload-overlay').classList.remove('active');
   document.getElementById('upload-result').style.display='none';
   document.getElementById('upload-progress').style.display='none';
+  _pendingUploadFile = null;
   if (!isGuest) loadStats();
 }
 document.getElementById('file-input').addEventListener('change', async e => { const f=e.target.files[0]; if(f) await doUpload(f); e.target.value=''; });
@@ -1569,30 +1587,96 @@ dz.addEventListener('dragleave',()=>{dz.style.borderColor='var(--border)';});
 dz.addEventListener('drop',async e=>{e.preventDefault();dz.style.borderColor='var(--border)';const f=e.dataTransfer.files[0];if(f)await doUpload(f);});
 
 async function doUpload(file) {
-  const prog=document.getElementById('upload-progress'), statEl=document.getElementById('upload-status'), fillEl=document.getElementById('progress-fill'), resEl=document.getElementById('upload-result');
-  prog.style.display='block'; resEl.style.display='none'; statEl.textContent='Processing...'; fillEl.style.width='30%';
-  const fd=new FormData(); fd.append('file',file);
-  try {
-    fillEl.style.width='70%';
-    const endpoint = isGuest ? '/api/guest/upload' : '/api/upload';
-    const res=await fetch(endpoint,{method:'POST',body:fd,credentials:'include'});
-    fillEl.style.width='100%';
-    if(!res.ok){const e=await res.json();statEl.textContent=`Error: ${e.detail}`;return;}
-    const d=await res.json(); statEl.textContent='Upload complete!'; resEl.style.display='block';
-    if(isGuest){
+  _pendingUploadFile = file;
+  const prog=document.getElementById('upload-progress'), statEl=document.getElementById('upload-status'),
+        fillEl=document.getElementById('progress-fill'), resEl=document.getElementById('upload-result');
+
+  // ── Guest mode: single-phase, no preview ──────────────────────────────────
+  if (isGuest) {
+    prog.style.display='block'; resEl.style.display='none'; statEl.textContent='Processing...'; fillEl.style.width='30%';
+    const fd=new FormData(); fd.append('file',file);
+    try {
+      fillEl.style.width='70%';
+      const res=await fetch('/api/guest/upload',{method:'POST',body:fd,credentials:'include'});
+      fillEl.style.width='100%';
+      if(!res.ok){const e=await res.json();statEl.textContent=`Error: ${e.detail}`;return;}
+      const d=await res.json(); statEl.textContent='Loaded!'; resEl.style.display='block';
       guestContacts=d.contacts||[];
       resEl.innerHTML=`<div class="upload-result-row"><span>✅ Contacts loaded (browser only)</span><strong style="color:var(--green)">${d.total_parsed}</strong></div>`;
       appendMessage('assistant',`✅ Loaded **${d.total_parsed}** contacts into your guest session. Start searching!`);
-    } else {
-      resEl.innerHTML=`
-        <div class="upload-result-row"><span>✅ New contacts added</span><strong style="color:var(--green)">${d.added}</strong></div>
-        <div class="upload-result-row"><span>🔄 Existing updated</span><strong>${d.updated}</strong></div>
-        <div class="upload-result-row"><span>⏭ Skipped</span><strong style="color:var(--muted)">${d.skipped}</strong></div>
-        <div class="upload-result-row"><span>📊 Total processed</span><strong>${d.total_parsed}</strong></div>`;
-      appendMessage('assistant',`✅ Upload complete! Added **${d.added}** new, updated **${d.updated}** existing contacts.`);
-      loadStats();
+    } catch(e){statEl.textContent='Upload failed. Please try again.';}
+    return;
+  }
+
+  // ── Private mode: preview phase ───────────────────────────────────────────
+  prog.style.display='block'; resEl.style.display='none'; statEl.textContent='Analysing…'; fillEl.style.width='40%';
+  const fd=new FormData(); fd.append('file',file);
+  try {
+    fillEl.style.width='85%';
+    const res=await fetch('/api/upload/preview',{method:'POST',body:fd,credentials:'include'});
+    fillEl.style.width='100%';
+    if(!res.ok){const e=await res.json();statEl.textContent=`Error: ${e.detail}`;return;}
+    const d=await res.json();
+    prog.style.display='none'; resEl.style.display='block';
+
+    const newCount=d.new.length, changedCount=d.changed.length, unchangedCount=d.unchanged_count;
+
+    // Build collapsible drill-in list for changed contacts (cap at 20)
+    let changedDrill='';
+    if(changedCount>0){
+      const vis=d.changed.slice(0,20), more=changedCount-vis.length;
+      changedDrill=`<div id="upload-changed-drill" style="display:none;margin-top:6px;padding:8px 10px;background:var(--bg);border-radius:8px;max-height:180px;overflow-y:auto;font-size:12px">
+        ${vis.map(c=>{
+          const name=[c.first_name,c.last_name].filter(Boolean).join(' ')||c.linkedin_url;
+          const fields=c.changes.map(ch=>ch.field.replace(/_/g,' ')).join(', ');
+          return `<div style="color:var(--muted);padding:2px 0">· ${escHtml(name)} — <em>${escHtml(fields)}</em></div>`;
+        }).join('')}
+        ${more>0?`<div style="color:var(--muted);padding-top:4px">+ ${more} more</div>`:''}
+      </div>`;
     }
+
+    resEl.innerHTML=`
+      <div style="font-weight:600;font-size:14px;margin-bottom:10px">Upload Preview</div>
+      <div class="upload-result-row"><span>✅ New contacts</span><strong style="color:var(--green)">${newCount}</strong></div>
+      <div class="upload-result-row" style="${changedCount>0?'cursor:pointer':''}" ${changedCount>0?`onclick="const d=document.getElementById('upload-changed-drill');d.style.display=d.style.display==='none'?'block':'none'"`:''}>
+        <span>🔄 With changes${changedCount>0?' <span style="font-size:11px;color:var(--accent2)">▼ details</span>':''}</span><strong>${changedCount}</strong>
+      </div>
+      ${changedDrill}
+      <div class="upload-result-row"><span>▬ No changes (up to date)</span><strong style="color:var(--muted)">${unchangedCount}</strong></div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="action-btn primary" style="font-size:13px;padding:8px 18px" onclick="confirmUpload()">Confirm Upload</button>
+        <button class="action-btn" style="font-size:13px;padding:8px 18px" onclick="cancelUploadPreview()">Cancel</button>
+      </div>`;
+  } catch(e){prog.style.display='none'; statEl.textContent='Preview failed. Please try again.';}
+}
+
+async function confirmUpload() {
+  if(!_pendingUploadFile) return;
+  const prog=document.getElementById('upload-progress'), statEl=document.getElementById('upload-status'),
+        fillEl=document.getElementById('progress-fill'), resEl=document.getElementById('upload-result');
+  prog.style.display='block'; statEl.textContent='Uploading…'; fillEl.style.width='30%';
+  const fd=new FormData(); fd.append('file',_pendingUploadFile);
+  try {
+    fillEl.style.width='70%';
+    const res=await fetch('/api/upload',{method:'POST',body:fd,credentials:'include'});
+    fillEl.style.width='100%';
+    if(!res.ok){const e=await res.json();statEl.textContent=`Error: ${e.detail}`;return;}
+    const d=await res.json(); statEl.textContent='Upload complete!';
+    resEl.innerHTML=`
+      <div class="upload-result-row"><span>✅ New contacts added</span><strong style="color:var(--green)">${d.added}</strong></div>
+      <div class="upload-result-row"><span>🔄 Actually updated</span><strong>${d.updated}</strong></div>
+      <div class="upload-result-row"><span>⏭ Skipped (no URL)</span><strong style="color:var(--muted)">${d.skipped}</strong></div>
+      <div class="upload-result-row"><span>📊 Total processed</span><strong>${d.total_parsed}</strong></div>`;
+    appendMessage('assistant',`✅ Upload complete! Added **${d.added}** new, updated **${d.updated}** contacts with actual changes.`);
+    _pendingUploadFile=null;
+    loadStats();
   } catch(e){statEl.textContent='Upload failed. Please try again.';}
+}
+
+function cancelUploadPreview() {
+  _pendingUploadFile=null;
+  document.getElementById('upload-result').style.display='none';
+  document.getElementById('upload-progress').style.display='none';
 }
 
 // ── Admin ──────────────────────────────────────────────────────────────────

@@ -7,6 +7,12 @@ from typing import List
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# Columns that CSV upsert NEVER touches — enrichment data must survive re-uploads
+ENRICHMENT_COLS = {"enriched_industry", "enriched_company_desc", "enriched_at", "location"}
+
+# Columns that are compared and updated by CSV upsert
+UPSERT_COLS = ["first_name", "last_name", "email", "company", "position", "connected_on"]
+
 # ThreadedConnectionPool is thread-safe — required because uvicorn runs
 # FastAPI sync handlers on threads. Lazily initialized so import doesn't
 # fail if DATABASE_URL isn't set yet (e.g. during local dev without env).
@@ -83,9 +89,87 @@ def init_db():
         return_conn(conn)
 
 
-def upsert_connections(rows: List[dict]) -> dict:
+def preview_upsert(rows: List[dict]) -> dict:
+    """Dry-run: compare incoming rows against DB without writing anything.
+    Returns counts/details of new, changed, and unchanged contacts."""
     conn = get_conn()
     try:
+        urls = [row.get("linkedin_url", "").strip() for row in rows
+                if row.get("linkedin_url", "").strip()]
+
+        existing_map = {}
+        if urls:
+            rc = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            rc.execute(
+                "SELECT linkedin_url, first_name, last_name, email, "
+                "company, position, connected_on "
+                "FROM connections WHERE linkedin_url = ANY(%s)",
+                (urls,)
+            )
+            existing_map = {r["linkedin_url"]: dict(r) for r in rc.fetchall()}
+
+        new_contacts = []
+        changed_contacts = []
+        unchanged_count = 0
+
+        for row in rows:
+            url = row.get("linkedin_url", "").strip()
+            if not url:
+                continue
+
+            if url not in existing_map:
+                new_contacts.append({
+                    "first_name":  row.get("first_name") or "",
+                    "last_name":   row.get("last_name") or "",
+                    "company":     row.get("company") or "",
+                    "linkedin_url": url,
+                })
+            else:
+                existing = existing_map[url]
+                changes = []
+                for field in UPSERT_COLS:
+                    old_val = (existing.get(field) or "").strip()
+                    new_val = (row.get(field) or "").strip()
+                    if old_val != new_val:
+                        changes.append({"field": field, "old": old_val, "new": new_val})
+                if changes:
+                    changed_contacts.append({
+                        "first_name":  row.get("first_name") or "",
+                        "last_name":   row.get("last_name") or "",
+                        "linkedin_url": url,
+                        "changes":     changes,
+                    })
+                else:
+                    unchanged_count += 1
+
+        return {
+            "new":             new_contacts,
+            "changed":         changed_contacts,
+            "unchanged_count": unchanged_count,
+        }
+    finally:
+        return_conn(conn)
+
+
+def upsert_connections(rows: List[dict]) -> dict:
+    """Smart upsert: only UPDATE rows where at least one UPSERT_COL value changed.
+    Enrichment columns (ENRICHMENT_COLS) are never touched."""
+    conn = get_conn()
+    try:
+        # Batch-fetch existing contacts for all incoming URLs
+        urls = [row.get("linkedin_url", "").strip() for row in rows
+                if row.get("linkedin_url", "").strip()]
+        existing_map = {}
+        if urls:
+            rc = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            rc.execute(
+                "SELECT linkedin_url, first_name, last_name, email, "
+                "company, position, connected_on "
+                "FROM connections WHERE linkedin_url = ANY(%s)",
+                (urls,)
+            )
+            existing_map = {r["linkedin_url"]: dict(r) for r in rc.fetchall()}
+
         c = conn.cursor()
         added = updated = skipped = 0
         now = datetime.utcnow().isoformat()
@@ -95,23 +179,25 @@ def upsert_connections(rows: List[dict]) -> dict:
             if not url:
                 skipped += 1
                 continue
-            c.execute(
-                "SELECT id FROM connections WHERE linkedin_url = %s", (url,)
-            )
-            existing = c.fetchone()
-            if existing:
-                c.execute("""
-                    UPDATE connections SET
-                        first_name=%s, last_name=%s, email=%s, company=%s,
-                        position=%s, connected_on=%s, updated_at=%s
-                    WHERE linkedin_url=%s
-                """, (
-                    row.get("first_name"), row.get("last_name"),
-                    row.get("email"), row.get("company"),
-                    row.get("position"), row.get("connected_on"),
-                    now, url
-                ))
-                updated += 1
+
+            if url in existing_map:
+                existing = existing_map[url]
+                # Only update fields whose value actually changed
+                changed_fields = {
+                    field: row.get(field)
+                    for field in UPSERT_COLS
+                    if (existing.get(field) or "").strip() != (row.get(field) or "").strip()
+                }
+                if changed_fields:
+                    set_clause = ", ".join(f"{k} = %s" for k in changed_fields)
+                    vals = list(changed_fields.values()) + [now, url]
+                    c.execute(
+                        f"UPDATE connections SET {set_clause}, updated_at = %s "
+                        f"WHERE linkedin_url = %s",
+                        vals
+                    )
+                    updated += 1
+                # else: data is identical — skip entirely (no write, no updated count)
             else:
                 c.execute("""
                     INSERT INTO connections

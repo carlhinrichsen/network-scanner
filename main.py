@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 
-from database import init_db, upsert_connections, get_all_connections, get_stats, save_enrichment, log_upload
+from database import init_db, upsert_connections, preview_upsert, get_all_connections, get_stats, save_enrichment, log_upload
 from csv_parser import parse_linkedin_csv
 from ai_engine import (
     extract_filters, filter_connections, synthesise_response,
@@ -266,6 +266,15 @@ async def _read_and_parse_csv(file: UploadFile) -> list:
 # ---------------------------------------------------------------------------
 # Upload — private (requires login)
 # ---------------------------------------------------------------------------
+
+@app.post("/api/upload/preview")
+async def upload_preview(request: Request, file: UploadFile = File(...)):
+    """Dry-run: parse CSV and return new/changed/unchanged counts without writing to DB."""
+    require_session(request)
+    rows = await _read_and_parse_csv(file)
+    preview = preview_upsert(rows)
+    return {"total_parsed": len(rows), **preview}
+
 
 @app.post("/api/upload")
 async def upload_csv(request: Request, file: UploadFile = File(...)):
