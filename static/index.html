@@ -294,12 +294,18 @@
 <!-- UPLOAD OVERLAY -->
 <div class="upload-overlay" id="upload-overlay">
   <div class="upload-modal">
-    <h2 id="upload-title">Upload LinkedIn Connections</h2>
-    <p id="upload-desc">Export from LinkedIn → Settings → Data Privacy → Get a copy of your data → Connections. Upload the CSV here.</p>
+    <h2 id="upload-title">Upload Connections</h2>
+    <div id="upload-desc" style="color:var(--muted);font-size:13px;margin-bottom:20px;line-height:1.8;text-align:left">
+      <strong style="color:var(--text);font-size:12px;text-transform:uppercase;letter-spacing:.04em">Accepted files</strong>
+      <ol style="margin:6px 0 0 18px;padding:0;display:flex;flex-direction:column;gap:3px">
+        <li>LinkedIn Connections &mdash; <a href="https://www.linkedin.com/help/linkedin/answer/a566336/export-connections-from-linkedin" target="_blank" rel="noopener" style="color:var(--accent2);text-decoration:none">How to export</a></li>
+        <li>CSV files following <a href="/static/shrimpsandwich_import_template.xlsx" download style="color:var(--accent2);text-decoration:none">this template</a></li>
+      </ol>
+    </div>
     <div class="upload-drop" id="upload-drop" onclick="document.getElementById('file-input').click()">
       <div class="drop-icon">📁</div>
-      <p style="font-weight:600;margin-bottom:4px">Click to select CSV file</p>
-      <p style="font-size:12px;color:var(--muted)">or drag and drop</p>
+      <p style="font-weight:600;margin-bottom:4px">Click to select file</p>
+      <p style="font-size:12px;color:var(--muted)">CSV · or drag and drop</p>
     </div>
     <input type="file" id="file-input" accept=".csv">
     <div class="upload-progress" id="upload-progress">
@@ -518,8 +524,8 @@ function enterGuestMode() {
   document.getElementById('user-email-display').textContent = 'Guest';
   document.getElementById('enrich-btn').style.display = 'none';
   document.getElementById('guest-notice').style.display = 'block';
-  document.getElementById('upload-title').textContent = 'Upload Your LinkedIn Connections';
-  document.getElementById('upload-desc').textContent = 'Your data stays in your browser only — nothing is stored on our servers.';
+  document.getElementById('upload-title').textContent = 'Upload Connections';
+  document.getElementById('upload-desc').innerHTML = '<span style="color:var(--muted);font-size:13px">Your data stays in your browser only &mdash; nothing is stored on our servers.</span>';
   appendMessage('assistant', '👤 **Guest mode** — upload your LinkedIn CSV to get started. Your data stays in your browser and is never stored on our servers.');
 }
 

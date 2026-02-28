@@ -521,13 +521,19 @@ async def healthz():
 async def export_csv(req: ExportRequest):
     output = io.StringIO()
     fieldnames = [
-        "first_name", "last_name", "email", "company", "position",
+        "name", "first_name", "last_name", "email", "company", "position",
         "location", "linkedin_url", "connected_on",
         "enriched_industry", "enriched_company_desc", "_score"
     ]
+    # Compute consolidated name field for each row
+    rows = []
+    for row in req.results:
+        r = dict(row)
+        r["name"] = f"{r.get('first_name', '')} {r.get('last_name', '')}".strip()
+        rows.append(r)
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
-    writer.writerows(req.results)
+    writer.writerows(rows)
     output.seek(0)
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode()),
