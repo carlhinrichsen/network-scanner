@@ -20,6 +20,13 @@ def parse_linkedin_csv(content: Union[bytes, str]) -> list[dict]:
             header_idx = i
             break
 
+    if header_idx == 0 and "First Name" not in lines[0]:
+        raise ValueError(
+            "This doesn't look like a LinkedIn connections export. "
+            "Please go to LinkedIn → Settings → Data Privacy → Get a copy of your data "
+            "→ Connections, then upload the downloaded CSV."
+        )
+
     clean_csv = "\n".join(lines[header_idx:])
     df = pd.read_csv(io.StringIO(clean_csv))
 
@@ -38,6 +45,14 @@ def parse_linkedin_csv(content: Union[bytes, str]) -> list[dict]:
 
     df = df.rename(columns=column_map)
 
+    # Validate that the essential URL column is present
+    if "linkedin_url" not in df.columns:
+        raise ValueError(
+            "The CSV is missing the 'URL' column. "
+            "Please make sure you're uploading a LinkedIn connections export "
+            "(not invitations, messages, or another LinkedIn data file)."
+        )
+
     # Keep only known columns
     keep = [v for v in column_map.values() if v in df.columns]
     df = df[keep]
@@ -48,5 +63,12 @@ def parse_linkedin_csv(content: Union[bytes, str]) -> list[dict]:
 
     # Drop rows without a LinkedIn URL
     df = df[df["linkedin_url"].str.startswith("http")]
+
+    if df.empty:
+        raise ValueError(
+            "No valid contacts found in this file. "
+            "The CSV was parsed but contained no rows with a LinkedIn profile URL. "
+            "Please check you exported the right file from LinkedIn."
+        )
 
     return df.to_dict(orient="records")

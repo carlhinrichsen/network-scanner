@@ -521,7 +521,7 @@ async def healthz():
 async def export_csv(req: ExportRequest):
     output = io.StringIO()
     fieldnames = [
-        "first_name", "last_name", "company", "position",
+        "first_name", "last_name", "email", "company", "position",
         "location", "linkedin_url", "connected_on",
         "enriched_industry", "enriched_company_desc", "_score"
     ]
