@@ -444,7 +444,7 @@ async def enrich(req: EnrichRequest, request: Request):
     to_enrich = {}
     for url in req.linkedin_urls:
         c = conn_map.get(url)
-        if c and not c.get("enriched_at"):
+        if c:
             company = c.get("company") or "Unknown"
             if company not in to_enrich:
                 to_enrich[company] = []

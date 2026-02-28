@@ -1460,7 +1460,13 @@ function requestEnrich() {
   const checked = currentResults.filter(r => checkedUrls.has(r.linkedin_url));
   if (!checked.length) { appendMessage('assistant', 'No contacts selected — tick the checkboxes for the contacts you want to enrich.'); return; }
   const unenriched = checked.filter(r => !r.enriched_at && !enrichingUrls.has(r.linkedin_url));
-  if (!unenriched.length) { appendMessage('assistant','All selected contacts are already enriched! 🎉'); return; }
+  if (!unenriched.length) {
+    pendingEnrichUrls = checked.map(r => r.linkedin_url);
+    const msgEl = appendMessage('assistant', `All ${checked.length} selected contact${checked.length > 1 ? 's are' : ' is'} already enriched! 🎉\n\nWant to re-run enrichment to refresh their data?`);
+    const bubble = msgEl.querySelector('.msg-bubble');
+    bubble.innerHTML += `<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="action-btn primary" style="font-size:12px" onclick="confirmReEnrich(this)">✨ Yes, re-enrich ${checked.length} contact${checked.length > 1 ? 's' : ''}</button><button class="action-btn" style="font-size:12px" onclick="this.closest('div').innerHTML='<span style=\\'color:var(--muted);font-size:12px\\'>Skipped.</span>'">Cancel</button></div>`;
+    return;
+  }
   const cos=[...new Set(unenriched.map(r=>r.company).filter(Boolean))];
   pendingEnrichUrls = unenriched.map(r=>r.linkedin_url);
   document.getElementById('confirm-text').textContent=`This will look up ${unenriched.length} selected contacts across ${cos.length} companies online via Tavily. Proceed?`;
@@ -1526,6 +1532,10 @@ async function confirmEnrich() {
   document.getElementById('enrich-btn').disabled = false;
 }
 function cancelEnrich() { document.getElementById('confirm-banner').classList.remove('active'); pendingEnrichUrls=[]; }
+function confirmReEnrich(btn) {
+  btn.closest('div').innerHTML = '<span style="color:var(--muted);font-size:12px">⏳ Re-enriching…</span>';
+  confirmEnrich();
+}
 
 // ── Export ─────────────────────────────────────────────────────────────────
 async function exportCSV() {
